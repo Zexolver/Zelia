@@ -253,13 +253,78 @@ Resolved:
 3. ~~install.sh's final wake-word warning is stale~~ — the final summary
    now correctly says "hey jarvis" works right now by default and "hey
    zelia" via Porcupine is optional, with the console.picovoice.ai caveat.
+6. ~~webrtcvad crashed the whole process at import (`ModuleNotFoundError:
+   pkg_resources`)~~ — found by actually installing the `zelia-git`
+   package and running it. `setuptools>=81` dropped `pkg_resources`
+   entirely, and modern `python -m venv` doesn't bundle setuptools by
+   default any more, so it just wasn't there. Pinned `setuptools<81` in
+   `requirements.txt`.
+7. ~~`tts.py`'s `speak()` crashed on every reply~~ (`wave.Error: #
+   channels not specified`) — `piper-tts` 1.6.0 is a rewrite
+   (OHF-voice/piper1-gpl); `synthesize()` no longer writes into a
+   `wave.Wave_write` handle, it returns `AudioChunk` objects with ready
+   int16 PCM. `speak()` rewritten around the current API. This one was
+   sneaky: the agent was generating correct replies the whole time, they
+   were dying in TTS before ever reaching the user (voice *or* text) —
+   confirmed fixed by literally hearing "banana" spoken aloud, and by
+   `zelia-say` getting a real reply back over the socket.
+8. ~~`on_text`'s `respond()` called `tts.speak()` before `send_line()`~~
+   — meant issue 7 also silently broke the text-input feature: a TTS
+   exception meant the socket client got nothing, even though the
+   agent's reply existed. Added `safe_speak()` (catches, logs, never
+   propagates) in `main.py`, used by both `on_wake` and `on_text`, and
+   `on_text`'s `respond()` now sends the text reply *first* — typed
+   input's whole point is not depending on audio, it shouldn't be able
+   to fail because TTS did.
+9. ~~openwakeword's `Model()` crashed with `AudioFeatures.__init__() got
+   an unexpected keyword argument 'wakeword_models'`~~ — that kwarg was
+   renamed to `wakeword_model_paths` (full paths, not bare names) at
+   some point; unknown kwargs get silently forwarded into `AudioFeatures`
+   internally, which is why the error pointed at the wrong class.
+   `wake_word.py` now resolves the configured stock name (e.g.
+   `hey_jarvis`) against openwakeword's bundled, versioned filenames
+   (`openwakeword.get_pretrained_model_paths()`) instead of hardcoding a
+   name→path mapping. Confirmed fixed: startup goes straight to "ZELIA is
+   ready" with no wake-word error now.
+
+Note on 6-9: all four are 2026-era API drift in third-party packages
+(setuptools, piper-tts, openwakeword) versus whatever version the
+original code was written against — not anything introduced by the
+ZEUS→ZELIA rename or this session's other changes. Found only because
+the package was actually built, installed, and run rather than just
+read. If `pip install -r requirements.txt` starts failing again later
+for a similar reason, check the installed package's actual current API
+first rather than assuming the existing code is still correct.
+
+10. ~~Ollama wasn't actually using the GPU~~ (`ollama ps` showed
+   "100% CPU" for the small brain despite `OLLAMA_VULKAN=1`) — two
+   separate bugs, both now fixed in `install.sh` and
+   `packaging/zelia-setup`:
+   - The plain `ollama` Arch package only ships CPU ggml backends
+     (`/usr/lib/ollama/*.so`, all `libggml-cpu-*`). Vulkan support is a
+     *separate* package, `ollama-vulkan` (adds `libggml-vulkan.so` in a
+     `vulkan/` subdirectory, depends on `ollama` rather than replacing
+     it) — it has to be installed explicitly on AMD.
+   - `/etc/environment` only reaches PAM login sessions — it does
+     **nothing** for a system-level systemd unit like `ollama.service`.
+     The actual mechanism is a drop-in override
+     (`/etc/systemd/system/ollama.service.d/override.conf`) with
+     `Environment=` lines, `daemon-reload`, then a real restart. Also
+     needs `OLLAMA_LIBRARY_PATH=/usr/lib/ollama/vulkan` set the same
+     way, or the dynamic backend loader won't find the subdirectory the
+     Vulkan `.so` lives in.
+   Confirmed fixed on the reference machine: `ollama ps` now reports
+   "100% GPU", and `journalctl -u ollama` shows `device_info: Vulkan0 :
+   AMD Radeon RX 580 Series (RADV POLARIS10)`. If this ever regresses,
+   check `systemctl cat ollama` for the drop-in and `ollama ps`'s
+   PROCESSOR column, not `/etc/environment`.
 
 Still open:
 
-4. `press_key`'s Wayland path (`desktop_control.py`, `YDOTOOL_KEYS`) only
+5. `press_key`'s Wayland path (`desktop_control.py`, `YDOTOOL_KEYS`) only
    has a handful of key combos mapped — extend as needed.
-5. Window focus has no implementation on GNOME/KDE Wayland (no standard API
-   for it) — currently just skipped gracefully there.
+5b. Window focus has no implementation on GNOME/KDE Wayland (no standard
+   API for it) — currently just skipped gracefully there.
 
 ## Pending features (not yet built)
 

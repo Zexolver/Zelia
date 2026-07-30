@@ -89,20 +89,25 @@ echo
 # 6. Ollama (small brain + vision model host)
 # ---------------------------------------------------------------------------
 echo "--- Installing Ollama ---"
-if ! command -v ollama >/dev/null 2>&1; then
-    curl -fsSL https://ollama.com/install.sh | sh
-else
-    echo "Ollama already installed, skipping."
-fi
 if [ "$GPU_VENDOR" = "amd" ]; then
-    # Vulkan backend for Ollama -- works on GPU generations ROCm has dropped
-    # (e.g. Polaris/RX 5xx), since it's vendor/architecture-agnostic.
-    if ! grep -q '^OLLAMA_VULKAN=1' /etc/environment 2>/dev/null; then
-        echo 'OLLAMA_VULKAN=1' | sudo tee -a /etc/environment >/dev/null
-    fi
-    export OLLAMA_VULKAN=1
+    # ollama-vulkan is a separate Arch package (adds the Vulkan ggml
+    # backend .so alongside plain `ollama`, doesn't replace it) -- works on
+    # GPU generations ROCm has dropped (e.g. Polaris/RX 5xx), since Vulkan
+    # is vendor/architecture-agnostic.
+    sudo pacman -S --needed --noconfirm ollama-vulkan
+    # /etc/environment only reaches PAM login sessions, never a
+    # system-level systemd unit -- a drop-in override is what actually
+    # reaches ollama.service. The Vulkan backend also lives in a
+    # subdirectory ollama's dynamic loader needs pointed at explicitly.
+    sudo mkdir -p /etc/systemd/system/ollama.service.d
+    printf '[Service]\nEnvironment="OLLAMA_VULKAN=1"\nEnvironment="OLLAMA_LIBRARY_PATH=/usr/lib/ollama/vulkan"\n' \
+        | sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null
+else
+    sudo pacman -S --needed --noconfirm ollama
 fi
-sudo systemctl enable --now ollama 2>/dev/null || true
+sudo systemctl daemon-reload
+sudo systemctl enable ollama 2>/dev/null || true
+sudo systemctl restart ollama  # picks up the vulkan override.conf even if ollama was already running
 echo
 
 # ---------------------------------------------------------------------------

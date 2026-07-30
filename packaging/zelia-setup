@@ -36,8 +36,18 @@ if command -v lspci >/dev/null 2>&1; then
     fi
 fi
 echo "Detected GPU vendor: $GPU_VENDOR"
-if [ "$GPU_VENDOR" = "amd" ] && ! grep -q '^OLLAMA_VULKAN=1' /etc/environment 2>/dev/null; then
-    echo 'OLLAMA_VULKAN=1' | sudo tee -a /etc/environment >/dev/null
+if [ "$GPU_VENDOR" = "amd" ]; then
+    # /etc/environment only applies to PAM login sessions, never to a
+    # system-level systemd unit like ollama.service -- a drop-in override
+    # is the actual mechanism that reaches it. ollama-vulkan is a separate
+    # package from plain `ollama` (adds the Vulkan ggml backend .so rather
+    # than replacing anything), and its backend lives in a subdirectory
+    # ollama's dynamic loader needs pointed out via OLLAMA_LIBRARY_PATH.
+    sudo pacman -S --needed --noconfirm ollama-vulkan
+    sudo mkdir -p /etc/systemd/system/ollama.service.d
+    printf '[Service]\nEnvironment="OLLAMA_VULKAN=1"\nEnvironment="OLLAMA_LIBRARY_PATH=/usr/lib/ollama/vulkan"\n' \
+        | sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null
+    sudo systemctl daemon-reload
 fi
 echo
 
@@ -66,7 +76,8 @@ if ! command -v ollama >/dev/null 2>&1; then
     echo "then re-run zelia-setup."
     exit 1
 fi
-sudo systemctl enable --now ollama 2>/dev/null || true
+sudo systemctl enable ollama 2>/dev/null || true
+sudo systemctl restart ollama  # picks up the vulkan override.conf even if ollama was already running
 echo "--- Pulling models (this can take a while) ---"
 ollama pull qwen2.5:7b-instruct-q4_K_M
 ollama pull moondream
