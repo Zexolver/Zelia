@@ -15,6 +15,7 @@ from src.config import load_config
 from src.utils.logger import get_logger
 from src.wake_word import build_wake_word_listener
 from src.hotkey_listener import start_hotkey_listener
+from src.text_input import start_text_input_server
 from src.stt import SpeechToText
 from src.tts import TextToSpeech
 from src.brains.small_brain import SmallBrain
@@ -129,16 +130,39 @@ def main():
     if cfg.hotkey.get("enabled", True):
         start_hotkey_listener(cfg.hotkey.get("key", "KEY_SCROLLLOCK"), on_wake)
 
+    def on_text(user_text: str, send_line):
+        if not activation_lock.acquire(blocking=False):
+            send_line("Still working on your last request -- one sec.")
+            return
+        try:
+            def respond(msg: str) -> None:
+                tts.speak(msg)
+                send_line(msg)
+
+            agent.handle_request(user_text, speak=respond, remember_and_reply_when_done=respond)
+        finally:
+            activation_lock.release()
+
+    start_text_input_server(cfg.install_dir, on_text)
+    log.info("Type to her any time with: python -m src.text_repl")
+
     try:
         listener = build_wake_word_listener(cfg)
     except Exception as exc:
+        # Not fatal: the hotkey and typed text (src/text_repl.py) still work
+        # without a wake word engine, so keep running rather than exiting --
+        # only the "hey jarvis"/"hey zelia" path is unavailable.
         log.error("Could not start the wake word engine: %s", exc)
         log.error("See README.md, section 'Wake word (and a faster alternative for quiet moments)', to finish setting up 'hey zelia'.")
-        sys.exit(1)
+        log.error("Continuing without wake word -- push-to-talk hotkey and typed input (python -m src.text_repl) still work.")
+        listener = None
 
-    log.info("ZELIA is ready. Say '%s', or press your push-to-talk hotkey.", cfg.assistant.wake_word)
+    log.info("ZELIA is ready. Say '%s', press your push-to-talk hotkey, or type to her (python -m src.text_repl).", cfg.assistant.wake_word)
     try:
-        listener.listen_forever(on_wake)
+        if listener is not None:
+            listener.listen_forever(on_wake)
+        else:
+            threading.Event().wait()  # block forever; hotkey/text threads above keep doing the work
     except KeyboardInterrupt:
         log.info("Shutting down.")
         sys.exit(0)
