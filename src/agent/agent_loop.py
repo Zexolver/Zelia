@@ -265,7 +265,9 @@ class AgentLoop:
             if is_destructive(command) and not args.get("confirmed"):
                 result = {"needs_confirmation": True, "command": command}
             else:
-                result = desktop_control.open_terminal(command=command, cwd=self.files.workspace_dir)
+                result = desktop_control.preserve_focus_if_user_active(
+                    lambda: desktop_control.open_terminal(command=command, cwd=self.files.workspace_dir)
+                )
         elif name == "run_shell_quiet":
             args.pop("quiet", None)  # tool name already implies this; small models sometimes add it anyway
             result = run_shell(cwd=self.files.workspace_dir, **args)
@@ -284,11 +286,13 @@ class AgentLoop:
         elif name == "describe_screen":
             result = screen_tool.describe_screen(args.get("question", ""), self.vision_model, self.ollama_host)
         elif name == "show_me":
-            result = app_launcher.show_me(**args)
+            result = desktop_control.preserve_focus_if_user_active(lambda: app_launcher.show_me(**args))
         elif name == "list_apps":
             result = app_launcher.list_apps()
         elif name == "open_browser":
-            result = browser_control.open_browser(default_browser=self.default_browser, **args)
+            result = desktop_control.preserve_focus_if_user_active(
+                lambda: browser_control.open_browser(default_browser=self.default_browser, **args)
+            )
         elif name == "set_browser_for_now":
             result = browser_control.set_browser_for_now(**args)
         elif name == "set_default_browser":
@@ -302,7 +306,7 @@ class AgentLoop:
         elif name == "click_at":
             result = desktop_control.click_at(**args)
         elif name == "focus_window":
-            result = desktop_control.focus_window(**args)
+            result = desktop_control.preserve_focus_if_user_active(lambda: desktop_control.focus_window(**args))
         else:
             return {"ok": False, "error": f"Unknown tool {name}"}
 

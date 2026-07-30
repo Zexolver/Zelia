@@ -101,6 +101,20 @@ keep this direction for anything added here later:
   that's the one part that's inherently on the critical path and not a
   target for further optimization without changing that requirement.
 
+  Explicit user framing: this store doesn't need to be human-readable —
+  it's ZELIA's own memory, optimized for how efficiently *she* can write
+  to and recall from it, not for a person browsing the chroma DB by hand.
+  Don't add human-facing polish here (pretty formatting, summaries meant
+  to be read by the user, etc.) at the cost of efficiency.
+
+  One concrete, not-yet-implemented refinement in this spirit: `remember()`
+  currently stores every turn indiscriminately, including ZELIA's own
+  confused/wrong turns, which then come back via `recall()` as "relevant
+  context" for similar future requests — plausibly reinforcing past
+  mistakes rather than helping (see known issue #11's model-comparison
+  note). Some kind of quality signal before storage (or before recall)
+  could be worth it, but hasn't been built.
+
 **Text input** (`src/text_input.py` + `src/text_repl.py`): typed keyboard
 input, not just STT — the main process listens on a Unix socket
 (`<install_dir>/zelia.sock`) rather than reading its own stdin (it usually
@@ -164,6 +178,42 @@ exists specifically so wake-word reliability isn't a blocker for talking
 quietly/whispering (e.g. late at night) — pressing the hotkey skips wake
 word audio classification entirely and goes straight to
 VAD-recording + Whisper, which handle quiet speech far better.
+
+**Focus-steal guard + window highlight** (`src/idle_detect.py`,
+`desktop_control.preserve_focus_if_user_active`,
+`src/agent/tools/window_highlight.py`): explicit user requirement —
+ZELIA using the GUI (opening a terminal/browser, launching or focusing an
+app) must not yank keyboard focus away from whatever window the user is
+actively working in.
+- `idle_detect.py` tracks keyboard/mouse activity via evdev (same kernel-
+  level mechanism as the hotkey listener and ydotool — works identically
+  on Xorg/Wayland). `is_user_active(threshold_seconds)` answers "has there
+  been input recently"; defaults to `True` (the safe assumption — don't
+  steal focus) if tracking never started at all (no python-evdev, no
+  input devices, permissions).
+- `desktop_control.preserve_focus_if_user_active(action)` wraps the four
+  tool-dispatch points that can change window focus in `agent_loop.py`
+  (`run_in_terminal`, `open_browser`, `show_me`, `focus_window`): captures
+  the previously-active window, runs the action, and — only if the user
+  was active — restores focus to that previous window afterward. Xorg
+  only for now (`xdotool getactivewindow`/`windowactivate`); best-effort
+  on Wayland is the same situation as `focus_window` already documented
+  below (no cross-compositor way to query/restore a specific window's
+  focus outside wlroots-specific tools).
+- `window_highlight.py` draws a purple (`#a020f0`) outline — four thin,
+  borderless, always-on-top strip windows around the target window's
+  edges, not one overlay covering it, so content is never obscured —
+  around whichever window ZELIA just used, *even after* focus gets
+  restored to the user's window. This is what actually satisfies "don't
+  steal my focus, but let me see what she's doing": input focus goes back
+  to the user, the highlight stays up regardless so it's visually obvious
+  which window is hers. Also Xorg-only for now (needs absolute screen
+  positioning via `xdotool getwindowgeometry`, which Wayland doesn't
+  expose to clients the same way) — not yet implemented for Wayland,
+  unlike some other best-effort-on-wlroots features elsewhere in this
+  project; would need a real Wayland client library
+  (`pywayland`/`wlr-layer-shell`) to do properly, which is a bigger lift
+  than was justified this pass.
 
 **Install, from source** (`install.sh`): prompts for install directory
 (supports pointing at a dedicated drive), auto-detects GPU vendor, installs
@@ -342,13 +392,29 @@ Still open:
    This is model/prompt-following unreliability, not a code defect in the
    dispatch path — the tool-crash-safety fix (see resolved issue notes
    above) and cwd-scoping fix are both confirmed working correctly when
-   the model calls tools properly. Worth investigating separately:
-   whether a stricter system prompt, a different/larger small-brain
-   model, or explicit validation+retry when a reply's content looks like
-   a leaked tool call (regex for `^\w+\s*\{.*\}$`, re-prompt or strip)
-   would help. Matters a lot for the user's stated priority of fully
-   unsupervised overnight coding runs, where nobody's there to notice a
-   wrong guess or a leaked tool-call string.
+   the model calls tools properly. Matters a lot for the user's stated
+   priority of fully unsupervised overnight coding runs, where nobody's
+   there to notice a wrong guess or a leaked tool-call string.
+
+   **Model comparison done, inconclusive in the model's favor**: pulled
+   `llama3-groq-tool-use:8b` (a Llama-3-8B fine-tuned specifically for
+   reliable tool-calling) and ran the identical prompt/tool-schema/system-
+   prompt against both models directly via `ollama.chat()` (bypassing the
+   rest of the pipeline), 5 trials each. Both got it right 5/5 — correct
+   relative paths, correct tool schema, no leaked pseudo-calls. This
+   means the earlier live failures probably weren't really about model
+   choice; more likely candidates are (a) the system prompt not yet
+   having the workspace-relative-path instruction at the time, since
+   fixed, and/or (b) `second_brain`'s "Relevant memories" recall
+   surfacing *ZELIA's own earlier confused turns* (e.g. "the file doesn't
+   exist" from a prior mistake) as context, potentially reinforcing the
+   same mistake on a later similar request. (b) is worth real
+   investigation — right now `remember()` stores every turn indiscriminately,
+   including the assistant's own errors/confusion, with no quality
+   filtering before it comes back as "relevant" context later. Did not
+   switch the configured small-brain model based on this evidence; no
+   clear win over the current one, and swapping without a clear reason
+   would just be churn.
 
 ## Pending features (not yet built)
 

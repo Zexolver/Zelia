@@ -16,6 +16,7 @@ from src.utils.logger import get_logger
 from src.wake_word import build_wake_word_listener
 from src.hotkey_listener import start_hotkey_listener
 from src.text_input import start_text_input_server
+from src import idle_detect
 from src.stt import SpeechToText
 from src.tts import TextToSpeech
 from src.brains.small_brain import SmallBrain
@@ -65,6 +66,8 @@ def main():
     cfg = load_config()
 
     log.info("Starting ZELIA (install dir: %s)", cfg.install_dir)
+
+    idle_detect.start()
 
     stt = SpeechToText(
         model_size=cfg.stt.model_size,

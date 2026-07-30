@@ -185,3 +185,46 @@ def focus_window(name: str) -> dict:
         return {"ok": True, "note": "best-effort via wlrctl"}
 
     return {"ok": False, "error": "No window-focus mechanism available on this Wayland compositor -- new windows should already be focused on launch."}
+
+
+# --------------------------------------------------------------------------
+# Focus-steal guard -- if the user is actively at the keyboard/mouse right
+# now, ZELIA opening/focusing a window for herself shouldn't yank focus away
+# from whatever they're doing. Captures whatever was focused before the
+# action runs and restores it afterward if the user appears active
+# (src/idle_detect.py). Xorg only for now via xdotool -- same "best-effort
+# on Wayland" situation as focus_window above, since restoring focus needs
+# the same window-activation mechanism that's already Wayland-limited there.
+# --------------------------------------------------------------------------
+def _get_active_window_id() -> str | None:
+    if _session_type() == "wayland" or not _has("xdotool"):
+        return None
+    try:
+        return subprocess.check_output(["xdotool", "getactivewindow"], text=True).strip()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def preserve_focus_if_user_active(action):
+    """Runs `action()` (some launch/focus side effect), then restores
+    whichever window was active beforehand if the user seems to be actively
+    using the computer right now -- while still leaving a purple outline
+    (window_highlight.py) around whatever window ZELIA just used, so the
+    user can see what she's doing without her taking their keyboard focus.
+    Returns action()'s result unchanged."""
+    from src import idle_detect
+    from src.agent.tools import window_highlight
+
+    previous = _get_active_window_id()
+    user_was_active = idle_detect.is_user_active()
+    result = action()
+    time.sleep(0.3)  # let the launched/focused window actually grab focus first
+
+    new_window = _get_active_window_id()
+    if new_window and new_window != previous:
+        window_highlight.highlight_window(new_window)
+
+    if user_was_active and previous:
+        subprocess.run(["xdotool", "windowactivate", previous], capture_output=True)
+        log.info("Restored focus to previous window (user was active)")
+    return result
