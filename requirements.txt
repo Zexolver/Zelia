@@ -5,6 +5,7 @@ beautifulsoup4
 pyyaml
 psutil
 numpy
+setuptools<81   # webrtcvad imports pkg_resources at import time; setuptools>=81 dropped it entirely
 
 # Speech
 faster-whisper

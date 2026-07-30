@@ -110,19 +110,29 @@ def main():
 
     activation_lock = threading.Lock()
 
+    def safe_speak(text: str) -> None:
+        # A TTS failure (bad audio device, a Piper API mismatch, etc.) should
+        # never take down request handling or block a typed reply from being
+        # delivered -- text input specifically exists to work independent of
+        # audio, so it can't depend on speak() succeeding.
+        try:
+            tts.speak(text)
+        except Exception as exc:  # noqa: BLE001
+            log.error("TTS failed (continuing without voice for this reply): %s", exc)
+
     def on_wake():
         if not activation_lock.acquire(blocking=False):
             log.info("Already handling a request -- ignoring this activation.")
             return
         try:
-            tts.speak("Yes?")
+            safe_speak("Yes?")
             user_text = stt.listen_and_transcribe()
             if not user_text:
                 return
             agent.handle_request(
                 user_text,
-                speak=tts.speak,
-                remember_and_reply_when_done=tts.speak,
+                speak=safe_speak,
+                remember_and_reply_when_done=safe_speak,
             )
         finally:
             activation_lock.release()
@@ -136,8 +146,8 @@ def main():
             return
         try:
             def respond(msg: str) -> None:
-                tts.speak(msg)
                 send_line(msg)
+                safe_speak(msg)
 
             agent.handle_request(user_text, speak=respond, remember_and_reply_when_done=respond)
         finally:

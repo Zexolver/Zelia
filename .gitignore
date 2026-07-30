@@ -12,5 +12,6 @@ config/config.yaml
 # makepkg build artifacts (packaging/stable/, packaging/testing/)
 packaging/*/src/
 packaging/*/pkg/
+packaging/*/zelia/
 packaging/*/*.pkg.tar.*
 packaging/*/*.log

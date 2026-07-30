@@ -56,10 +56,24 @@ class OpenWakeWordListener:
     FRAME_SIZE = int(SAMPLE_RATE * FRAME_MS / 1000)
 
     def __init__(self, model_name: str, threshold: float = 0.5):
+        import os
+
+        import openwakeword
         from openwakeword.model import Model as OWWModel
 
         self.threshold = threshold
-        self.model = OWWModel(wakeword_models=[model_name])
+        # openwakeword's Model takes wakeword_model_paths (full paths), not bare
+        # names -- resolve the configured stock name (e.g. "hey_jarvis") against
+        # its bundled, versioned filenames (e.g. hey_jarvis_v0.1.onnx) rather
+        # than hardcoding a version suffix that could change upstream.
+        model_paths = [
+            p for p in openwakeword.get_pretrained_model_paths()
+            if os.path.basename(p).split("_v")[0] == model_name
+        ]
+        if not model_paths:
+            available = sorted({os.path.basename(p).split("_v")[0] for p in openwakeword.get_pretrained_model_paths()})
+            raise ValueError(f"No openWakeWord stock model named {model_name!r}. Available: {available}")
+        self.model = OWWModel(wakeword_model_paths=model_paths)
 
     def listen_forever(self, on_wake):
         log.info("Listening for wake word (openWakeWord, threshold=%.2f)...", self.threshold)
