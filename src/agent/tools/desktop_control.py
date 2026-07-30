@@ -79,7 +79,7 @@ def open_terminal(command: str | None = None, keep_open: bool = True, cwd: str |
     if not terminal:
         return {"ok": False, "error": "No terminal emulator found. Install one (konsole, alacritty, kitty, etc.)."}
 
-    if command is None:
+    if not command:
         subprocess.Popen([terminal], cwd=cwd)
         return {"ok": True, "terminal": terminal, "action": "opened"}
 
