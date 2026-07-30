@@ -1,10 +1,10 @@
 __pycache__/
 *.pyc
-venv/
-.venv/
-models/
-memory/
-logs/
-workspace/
+/venv/
+/.venv/
+/models/
+/memory/
+/logs/
+/workspace/
 config/config.yaml
 !config/config.yaml.template

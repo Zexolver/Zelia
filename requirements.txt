@@ -21,6 +21,7 @@ pytesseract
 
 # Second brain (long-term memory)
 chromadb
+onnxruntime   # backs chromadb's DefaultEmbeddingFunction (ONNX MiniLM-L6-v2) -- see src/memory/second_brain.py
 
 # Large brain
 airllm
