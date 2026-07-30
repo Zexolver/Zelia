@@ -368,6 +368,55 @@ first rather than assuming the existing code is still correct.
    AMD Radeon RX 580 Series (RADV POLARIS10)`. If this ever regresses,
    check `systemctl cat ollama` for the drop-in and `ollama ps`'s
    PROCESSOR column, not `/etc/environment`.
+12. ~~**The entire large-brain (AirLLM) path was completely broken on
+   this machine**~~ — the single most important finding from live-testing
+   the overnight-autonomous-coding path (the user's top stated priority),
+   since nothing about this was exercised before. Two bugs, found by
+   actually submitting a "build a full app" request end-to-end (with a
+   temporarily swapped-in small test model, `TinyLlama/TinyLlama-1.1B-
+   Chat-v1.0` — the real configured `Meta-Llama-3.1-70B-Instruct` is
+   gated and ~35-40GB, impractical to pull just to test the plumbing;
+   config reverted after):
+   - `AirLLMBaseModel.__init__`'s own default is `device='cuda:0'`
+     regardless of actual hardware -- it does **not** auto-detect. On
+     this AMD machine (or any machine with no NVIDIA driver at all) this
+     crashed immediately with a bare `RuntimeError: Found no NVIDIA
+     driver...`, every single time, unconditionally -- there was no
+     working CPU fallback despite `gpu_manager.py`/CLAUDE.md assuming
+     one. Fixed in `airllm_worker.py`: passes
+     `device="cuda:0" if budget.airllm_gpu_usable else "cpu"` explicitly
+     to `AutoModel.from_pretrained()`, using the same `GpuBudget` that
+     was already being computed (and logged!) but never actually acted
+     on for device selection, only for the (skippable) memory-fraction
+     cap.
+   - Once that was fixed and a job actually completed, the reply
+     contained the **entire raw input prompt echoed back verbatim**
+     (including the "Relevant context from past conversations..."
+     template) before the model's real answer. `model.generate()`
+     returns prompt tokens + new tokens concatenated;
+     `airllm_worker.py` was decoding the whole thing instead of slicing
+     off `input_ids["input_ids"].shape[-1]` first. Fixed and verified
+     the slicing logic in isolation (not worth re-running the ~7.5-
+     minute full CPU generation twice just to confirm a one-line index
+     fix).
+   Confirmed end-to-end after both fixes: job submits, AirLLM loads and
+   generates on CPU (device=cpu logged correctly), worker writes a
+   clean, correctly-sliced result, on_done fires.
+13. ~~`game_guard`'s process-pattern list matched the bare Steam
+   **client**, not just an actively-running game~~ — `\bsteam(app|
+   linuxruntime)?\b`'s optional suffix meant plain "steam" (the launcher
+   process, which commonly stays resident in the background for
+   friends-list/overlay/updates with nothing actually being played)
+   always matched. Found because a "build a full app" request got
+   queued instead of running, even though nothing was actually being
+   played -- `ps aux` showed only the idle Steam client. On a machine
+   literally hostnamed "...-Gaming-Manjaro", leaving Steam open (very
+   likely) would have silently blocked every single overnight AirLLM
+   job forever. Made the suffix mandatory
+   (`\bsteam(app|linuxruntime)\b`) so only the actual per-game wrapper
+   processes (`SteamLinuxRuntime` et al.) match, not the client itself.
+   Confirmed fixed: same idle-Steam machine state no longer reports
+   "GAMING", and the queued job then ran immediately.
 
 Still open:
 
@@ -375,6 +424,22 @@ Still open:
    has a handful of key combos mapped — extend as needed.
 5b. Window focus has no implementation on GNOME/KDE Wayland (no standard
    API for it) — currently just skipped gracefully there.
+14. **`start_priority_manager` (`main.py`) can't always restore normal
+   priority after gaming ends** — logs a recurring `Could not renice`
+   warning every poll cycle once this happens. Standard Linux permission
+   rule: an unprivileged process can raise its own nice value (lower
+   priority) freely, but can't lower it back down again (raise priority)
+   without `CAP_SYS_NICE` — so once game_guard reniced ZELIA to
+   `gaming_nice` (10) during a detected game, she's stuck there even
+   after gaming ends, unable to `nice(0)` herself back down. Doesn't
+   crash anything (caught and logged, not fatal), just means she stays
+   slightly deprioritized after a gaming session ends until the process
+   restarts. Not fixed -- `zelia.service` is a systemd `--user` unit, and
+   granting `AmbientCapabilities=CAP_SYS_NICE` generally doesn't work for
+   user units the way it does for system units (the user's own
+   `systemd --user` instance isn't privileged enough to grant it), so
+   this needs more investigation before attempting a fix, not a
+   copy-paste systemd directive.
 11. **Small-brain tool-calling reliability is inconsistent** — found during
    live testing of "run this script in my workspace" style requests
    (`qwen2.5:7b-instruct-q4_K_M`, via `ollama`'s tool-calling). Two distinct

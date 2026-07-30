@@ -22,7 +22,14 @@ from src.utils.logger import get_logger
 log = get_logger("game_guard")
 
 DEFAULT_PATTERNS = [
-    r"\bsteam(app|linuxruntime)?\b", r"\bproton\b", r"\blutris\b", r"\bheroic\b",
+    # NOTE: "steam" alone is deliberately NOT matched -- the Steam client
+    # itself commonly stays running in the background (friends list,
+    # overlay, auto-updates) with nothing actually being played, and an
+    # optional suffix here previously matched bare "steam" too, meaning
+    # simply having Steam open (extremely likely on this hardware) would
+    # perpetually block every AirLLM job. steamapp/SteamLinuxRuntime are
+    # the actual per-game wrapper processes an active game launches under.
+    r"\bsteam(app|linuxruntime)\b", r"\bproton\b", r"\blutris\b", r"\bheroic\b",
     r"\bwine(64)?\b", r"\bretroarch\b", r"\bgamescope\b", r"\bminecraft\b",
     r"\.exe$",  # most Windows games run under Proton/Wine as an .exe process name
 ]

@@ -34,8 +34,13 @@ def main():
     max_new_tokens = job.get("max_new_tokens", cfg.brains.large.get("max_new_tokens", 2048))
     prompt = job["prompt"]
 
-    log.info("Loading %s via AirLLM (compression=%s)...", model_name, compression)
-    model = AutoModel.from_pretrained(model_name, compression=compression)
+    # AirLLM's own default is device='cuda:0' regardless of what's actually
+    # available -- it does NOT auto-detect, and blows up with a bare
+    # RuntimeError on any machine without an NVIDIA driver (this reference
+    # machine's AMD card included) unless told otherwise explicitly here.
+    device = "cuda:0" if budget.airllm_gpu_usable else "cpu"
+    log.info("Loading %s via AirLLM (device=%s, compression=%s)...", model_name, device, compression)
+    model = AutoModel.from_pretrained(model_name, compression=compression, device=device)
 
     input_ids = model.tokenizer(prompt, return_tensors="pt")
     log.info("Generating (this can take a while on limited VRAM)...")
@@ -44,7 +49,12 @@ def main():
         max_new_tokens=max_new_tokens,
         use_cache=True,
     )
-    text = model.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    # generate() returns the prompt tokens followed by the new ones -- slice
+    # off the input length, otherwise the reply is the entire original
+    # prompt (including the "Relevant context..." template) echoed back
+    # verbatim before the actual answer.
+    new_tokens = output_ids[0][input_ids["input_ids"].shape[-1]:]
+    text = model.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
     with open(result_path, "w") as f:
         json.dump({"ok": True, "text": text}, f)
