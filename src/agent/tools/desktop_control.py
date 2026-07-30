@@ -69,21 +69,24 @@ def _find_terminal() -> str | None:
     return None
 
 
-def open_terminal(command: str | None = None, keep_open: bool = True) -> dict:
+def open_terminal(command: str | None = None, keep_open: bool = True, cwd: str | None = None) -> dict:
     """Opens a new, visible terminal window. If `command` is given, runs it
-    there (visibly) instead of a hidden background subprocess."""
+    there (visibly) instead of a hidden background subprocess. Defaults to
+    starting in `cwd` (the agent's workspace) so commands like "run
+    hello.py" don't silently fail from wherever ZELIA's own process happens
+    to be running -- pass an explicit `cd` in `command` to override."""
     terminal = _find_terminal()
     if not terminal:
         return {"ok": False, "error": "No terminal emulator found. Install one (konsole, alacritty, kitty, etc.)."}
 
     if command is None:
-        subprocess.Popen([terminal])
+        subprocess.Popen([terminal], cwd=cwd)
         return {"ok": True, "terminal": terminal, "action": "opened"}
 
     flags = TERMINAL_RUN_FLAGS.get(terminal, ["-e", "bash", "-c"])
     shell_cmd = command if not keep_open else f"{command}; echo; echo '[done -- press enter to close]'; read"
-    subprocess.Popen([terminal, *flags, shell_cmd])
-    log.info("Ran in visible terminal (%s): %s", terminal, command)
+    subprocess.Popen([terminal, *flags, shell_cmd], cwd=cwd)
+    log.info("Ran in visible terminal (%s, cwd=%s): %s", terminal, cwd, command)
     return {"ok": True, "terminal": terminal, "action": "ran", "command": command}
 
 

@@ -265,9 +265,10 @@ class AgentLoop:
             if is_destructive(command) and not args.get("confirmed"):
                 result = {"needs_confirmation": True, "command": command}
             else:
-                result = desktop_control.open_terminal(command=command)
+                result = desktop_control.open_terminal(command=command, cwd=self.files.workspace_dir)
         elif name == "run_shell_quiet":
-            result = run_shell(**args)
+            args.pop("quiet", None)  # tool name already implies this; small models sometimes add it anyway
+            result = run_shell(cwd=self.files.workspace_dir, **args)
         elif name == "read_file":
             result = self.files.read(**args)
         elif name == "write_file":
@@ -356,6 +357,10 @@ class AgentLoop:
                     "the user can watch them happen in a real terminal window. Only use "
                     "run_shell_quiet if the user explicitly asked for something quiet or "
                     "run in the background.\n"
+                    "- run_in_terminal, run_shell_quiet, and run_code all already start "
+                    "inside your workspace directory -- use relative paths like `hello.py`, "
+                    "never guess an absolute path like `~/workspace/hello.py` (that's the "
+                    "user's actual home directory, not your workspace, and won't exist).\n"
                     "- For anything web-related, use open_browser (a real visible browser "
                     "window, default is Floorp) rather than just fetching text, unless the "
                     "user only asked you to look something up for yourself. Use "
@@ -365,7 +370,10 @@ class AgentLoop:
                     "- To interact with something only visible on screen (a button in a "
                     "browser, a menu in an app like Godot), use find_text_on_screen to "
                     "locate it, then click_at, then type_text/press_key as needed.\n"
-                    "- Keep spoken replies concise -- this is a voice conversation.\n\n"
+                    "- Keep spoken replies concise -- this is a voice conversation. Describe "
+                    "code, file contents, commands, and errors in plain natural language a "
+                    "non-technical listener would understand -- never read raw code syntax, "
+                    "file paths, or stack traces verbatim out loud.\n\n"
                     "Relevant memories:\n" + "\n".join(f"- {m}" for m in memories)
                 ),
             },
@@ -385,9 +393,19 @@ class AgentLoop:
             for call in tool_calls:
                 name = call["function"]["name"]
                 args = call["function"]["arguments"]
-                if isinstance(args, str):
-                    args = json.loads(args)
-                result = self._dispatch_tool(name, args)
+                try:
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                    result = self._dispatch_tool(name, args)
+                except Exception as exc:  # noqa: BLE001
+                    # A single bad tool call (malformed args, a hallucinated
+                    # extra kwarg, a permission error, etc.) must not take
+                    # down the whole request -- feed the error back as a
+                    # tool result so the model can retry/adapt, same as any
+                    # other tool outcome. This matters most for unsupervised
+                    # overnight runs with nobody watching to notice a crash.
+                    log.error("Tool %s failed: %s", name, exc)
+                    result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 messages.append({"role": "tool", "content": json.dumps(result)})
 
         speak("I'm having trouble finishing that one, sorry -- want me to try a different approach?")

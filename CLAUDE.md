@@ -325,6 +325,30 @@ Still open:
    has a handful of key combos mapped — extend as needed.
 5b. Window focus has no implementation on GNOME/KDE Wayland (no standard
    API for it) — currently just skipped gracefully there.
+11. **Small-brain tool-calling reliability is inconsistent** — found during
+   live testing of "run this script in my workspace" style requests
+   (`qwen2.5:7b-instruct-q4_K_M`, via `ollama`'s tool-calling). Two distinct
+   symptoms observed, both several times:
+   - It sometimes guesses an absolute path like `~/workspace/hello.py`
+     instead of using the relative path a command already running from
+     the workspace directory needs (`agent_loop.py`'s system prompt now
+     explicitly says commands start in the workspace and to use relative
+     paths — this reduced but did not eliminate the behavior).
+   - It sometimes emits what looks like a tool call (e.g.
+     `run_shell_quiet {"command": "..."}`) as plain text *content*
+     instead of a proper structured `tool_calls` response, so
+     `agent_loop.py`'s `if not tool_calls:` branch treats it as the final
+     answer and speaks/sends the raw pseudo-call syntax verbatim.
+   This is model/prompt-following unreliability, not a code defect in the
+   dispatch path — the tool-crash-safety fix (see resolved issue notes
+   above) and cwd-scoping fix are both confirmed working correctly when
+   the model calls tools properly. Worth investigating separately:
+   whether a stricter system prompt, a different/larger small-brain
+   model, or explicit validation+retry when a reply's content looks like
+   a leaked tool call (regex for `^\w+\s*\{.*\}$`, re-prompt or strip)
+   would help. Matters a lot for the user's stated priority of fully
+   unsupervised overnight coding runs, where nobody's there to notice a
+   wrong guess or a leaked tool-call string.
 
 ## Pending features (not yet built)
 
