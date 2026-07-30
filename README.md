@@ -1,4 +1,4 @@
-# ZEUS
+# ZELIA
 
 A local, voice-controlled personal agent for Manjaro/Arch. No cloud, no
 subscription -- everything runs on your machine.
@@ -14,7 +14,7 @@ subscription -- everything runs on your machine.
   - AirLLM loads a much larger model for big/quality-sensitive project work
     (e.g. "build a full app for X"), streaming its layers from disk since it
     won't fit in 8GB of VRAM all at once. This runs **in the background** --
-    ZEUS keeps answering quick questions while a big job is running, and
+    ZELIA keeps answering quick questions while a big job is running, and
     speaks up when it's done.
 - **GPU auto-detected, not hardcoded:** `src/gpu_detect.py` figures out
   NVIDIA vs AMD vs nothing at startup and routes each component accordingly
@@ -50,40 +50,41 @@ subscription -- everything runs on your machine.
   web search, if X isn't an app.
 - **Everything is native, not MCP:** screenshots, OCR, window focus, app
   launching, and desktop control all shell out directly to tools already on
-  your machine. No MCP server required for ZEUS to interact with your
+  your machine. No MCP server required for ZELIA to interact with your
   desktop, and no cloud API calls either -- everything above runs locally.
 - **Yields to games:** while a game is running (detected by process name or
   GPU usage), new AirLLM big-project jobs queue instead of starting, and
-  ZEUS's own process gets reniced down so she doesn't compete for CPU. Wake
+  ZELIA's own process gets reniced down so she doesn't compete for CPU. Wake
   word and quick commands keep working the whole time. See `gaming:` in
   config.yaml.
 
 ## Install
 
 ```bash
-unzip zeus.zip
-cd zeus
+git clone git@github.com:Zexolver/Zelia.git
+cd Zelia
 ./install.sh
 ```
 
-The installer will ask where to install her (defaults to `~/.zeus`, but you
+The installer will ask where to install her (defaults to `~/.zelia`, but you
 can point it at a dedicated SSD mount point) and handles everything else:
 system packages, Ollama, Python environment, the small conversation model,
-ZEUS's voice, and a systemd `--user` service.
+ZELIA's voice, and a systemd `--user` service -- it starts and enables that
+service itself, so ZELIA is already running by the time the script finishes.
 
 ```bash
-systemctl --user start zeus     # start now
-systemctl --user enable zeus    # start automatically at login
-journalctl --user -u zeus -f    # watch logs / see what she's doing
+systemctl --user status zelia     # check she's running
+systemctl --user restart zelia    # restart after editing config.yaml
+journalctl --user -u zelia -f     # watch logs / see what she's doing
 ```
 
 ## Wake word (and a faster alternative for quiet moments)
 
 **Default right now: "hey jarvis"**, via openWakeWord. It's fully local, no
 account needed, works immediately -- the tradeoff is it's a stock phrase,
-not "hey zeus," since openWakeWord doesn't ship custom names.
+not "hey zelia," since openWakeWord doesn't ship custom names.
 
-**"Hey zeus" via Picovoice Porcupine** is wired up and ready to switch to
+**"Hey zelia" via Picovoice Porcupine** is wired up and ready to switch to
 (`assistant.wake_word_engine: "porcupine"` in config.yaml), but its current
 free-tier terms for custom wake words are genuinely unclear as of this
 writing -- Picovoice's own GitHub repo (github.com/Picovoice/porcupine)
@@ -93,12 +94,12 @@ Enterprise-only. Worth five minutes to check yourself before relying on it:
 
 1. Free signup (no card) at https://console.picovoice.ai, grab your
    AccessKey.
-2. Try training a custom wake word for "hey zeus" targeting Linux/x86_64
+2. Try training a custom wake word for "hey zelia" targeting Linux/x86_64
    and see whether it lets you export it on a personal account.
 3. If it works: download the `.ppn` file to
-   `<install_dir>/models/wakeword/hey-zeus.ppn`, paste your AccessKey into
+   `<install_dir>/models/wakeword/hey-zelia.ppn`, paste your AccessKey into
    `assistant.picovoice_access_key`, set `wake_word_engine: "porcupine"`,
-   restart (`systemctl --user restart zeus`).
+   restart (`systemctl --user restart zelia`).
 4. If it doesn't (paywalled): no harm done, just stay on openWakeWord.
    Detection itself is fully offline either way once you have a model --
    the account/internet dependency is only for the one-time training step.
@@ -142,9 +143,9 @@ anyway:** there are community-maintained Docker images that compile PyTorch
 against specific older ROCm versions with the needed architecture flags
 re-enabled (search GitHub for "rocm gfx803 pytorch" if you're on Polaris,
 or the equivalent gfx target for your card). These aren't official, aren't
-maintained by ZEUS, and have a track record of being version-fussy and
+maintained by ZELIA, and have a track record of being version-fussy and
 occasionally unstable across kernel updates -- worth it if you want to push
-AirLLM's speed further, not necessary for ZEUS to work.
+AirLLM's speed further, not necessary for ZELIA to work.
 
 ## Desktop control
 
@@ -164,7 +165,7 @@ Works on both Xorg and Wayland:
   ydotool will silently fail to type/click. Check it's running with
   `systemctl --user status ydotoold`.
 - **Finding things to click:** `find_text_on_screen` OCRs the screen and
-  returns coordinates for matching text, so ZEUS can click a button or menu
+  returns coordinates for matching text, so ZELIA can click a button or menu
   item she can only see, not reach programmatically -- useful inside
   browsers, Godot, or any GUI app.
 - **Window focus:** works normally on Xorg (`wmctrl`). On Wayland it's
@@ -180,7 +181,7 @@ real app directly to a URL rather than simulating clicks into an address
 bar, since basically every browser supports that as a command-line argument
 -- much more reliable than typing it in.
 
-**Using Godot (or any other complex GUI app):** ZEUS can launch/focus it
+**Using Godot (or any other complex GUI app):** ZELIA can launch/focus it
 (`show_me`), write files directly into a Godot project (GDScript, scenes,
 etc. via `write_file`), and interact with the editor UI itself through the
 OCR-and-click primitives above. Be realistic about this last part, though --
@@ -222,11 +223,11 @@ in the first place -- see "GPU support" above.)
 install.sh                     top-level installer
 requirements.txt
 config/config.yaml.template    filled in by install.sh -> config/config.yaml
-systemd/zeus.service.template  filled in by install.sh -> ~/.config/systemd/user/zeus.service
+systemd/zelia.service.template  filled in by install.sh -> ~/.config/systemd/user/zelia.service
 systemd/ydotoold.service.template  filled in by install.sh -> ~/.config/systemd/user/ydotoold.service
 src/
   main.py                      wake word + hotkey -> STT -> agent -> TTS loop
-  wake_word.py                 Porcupine ("hey zeus") + openWakeWord listeners
+  wake_word.py                 Porcupine ("hey zelia") + openWakeWord listeners
   hotkey_listener.py           push-to-talk key (evdev, Xorg+Wayland alike)
   stt.py                       faster-whisper
   tts.py                       Piper
@@ -256,7 +257,7 @@ src/
 
 ## Known rough edges (first version)
 
-- Default wake word is "hey jarvis," not "hey zeus" -- see "Wake word (and
+- Default wake word is "hey jarvis," not "hey zelia" -- see "Wake word (and
   a faster alternative for quiet moments)" above for the Porcupine path (if
   its free tier works out) or just use the push-to-talk hotkey instead.
 - The push-to-talk hotkey grabs every input device evdev reports as a
@@ -267,7 +268,7 @@ src/
   (`src/agent/tools/desktop_control.py`'s `YDOTOOL_KEYS`) -- extend that map
   if you need combos beyond ctrl/alt/shift/super + a handful of keys.
 - Window focus on GNOME/KDE Wayland isn't available (see "Desktop control"
-  above) -- freshly launched apps are usually already focused, but ZEUS
+  above) -- freshly launched apps are usually already focused, but ZELIA
   can't deliberately switch focus to an already-open window there.
 - `fetch_url` is plain HTTP + text extraction; JS-heavy sites need the
   Playwright path wired in (the dependency's already installed).

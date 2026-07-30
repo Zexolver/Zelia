@@ -4,7 +4,7 @@ else on request. This is intentionally simple (launch `<browser> <url>`)
 rather than driving a headless/automated browser: it works with literally
 any installed browser regardless of what it's based on (Floorp, Firefox,
 Chromium, Brave, ...), and it's genuinely visible on screen like everything
-else in ZEUS's toolkit.
+else in ZELIA's toolkit.
 
 For actually reading a page's content back (e.g. to answer a question about
 documentation), pair this with fetch_url in browser_tool.py -- that's a

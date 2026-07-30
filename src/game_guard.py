@@ -3,11 +3,11 @@ Detects gaming and lets the rest of the app defer to it.
 
 Two signals, either one is enough to count as "gaming":
   1. A running process matches a known game/launcher pattern (configurable).
-  2. A non-ZEUS process is hogging a big share of the GPU (via nvidia-smi).
+  2. A non-ZELIA process is hogging a big share of the GPU (via nvidia-smi).
 
-Nothing here kills or pauses the game -- it just tells the rest of ZEUS
+Nothing here kills or pauses the game -- it just tells the rest of ZELIA
 ("agent_loop", "large_brain", "main") to back off: don't start new AirLLM
-jobs, lower ZEUS's own process priority. Wake word + quick commands still
+jobs, lower ZELIA's own process priority. Wake word + quick commands still
 work the whole time.
 """
 import re
@@ -27,7 +27,7 @@ DEFAULT_PATTERNS = [
     r"\.exe$",  # most Windows games run under Proton/Wine as an .exe process name
 ]
 
-GPU_HOG_THRESHOLD_PCT = 25  # a non-ZEUS process using >25% of one GPU counts as "gaming/heavy load"
+GPU_HOG_THRESHOLD_PCT = 25  # a non-ZELIA process using >25% of one GPU counts as "gaming/heavy load"
 
 
 class GameGuard:

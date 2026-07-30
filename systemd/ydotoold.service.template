@@ -1,0 +1,11 @@
+[Unit]
+Description=ydotoold (uinput daemon for ydotool, used by ZELIA's Wayland desktop control)
+
+[Service]
+Type=simple
+ExecStart={{YDOTOOLD_BIN}} --socket-path=%t/.ydotool_socket
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

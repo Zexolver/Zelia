@@ -1,0 +1,27 @@
+# Small brain / router / tools
+ollama
+requests
+beautifulsoup4
+pyyaml
+psutil
+numpy
+
+# Speech
+faster-whisper
+piper-tts
+sounddevice
+webrtcvad
+openwakeword
+pvporcupine
+evdev
+
+# Screen / vision
+pillow
+pytesseract
+
+# Second brain (long-term memory)
+chromadb
+
+# Large brain
+airllm
+torch

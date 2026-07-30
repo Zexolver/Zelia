@@ -1,0 +1,15 @@
+[Unit]
+Description=ZELIA voice assistant
+After=default.target network-online.target ydotoold.service
+Wants=ydotoold.service
+
+[Service]
+Type=simple
+WorkingDirectory={{INSTALL_DIR}}
+Environment=ZELIA_CONFIG={{INSTALL_DIR}}/config/config.yaml
+ExecStart={{INSTALL_DIR}}/venv/bin/python3 -m src.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

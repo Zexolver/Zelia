@@ -1,6 +1,6 @@
 """
 Dispatches big/quality-sensitive project work to AirLLM without blocking the
-rest of ZEUS.
+rest of ZELIA.
 
 Each job spawns a separate subprocess (src/brains/airllm_worker.py) with its
 own capped slice of VRAM (see gpu_manager). submit_async() returns
@@ -8,7 +8,7 @@ immediately; the small brain keeps handling normal conversation and simple
 commands the whole time.
 
 If a game is running (game_guard), new jobs are queued instead of started --
-AirLLM is the one part of ZEUS that's genuinely GPU-heavy, so it's the part
+AirLLM is the one part of ZELIA that's genuinely GPU-heavy, so it's the part
 that waits its turn. A background thread drains the queue as soon as gaming
 stops. When a job finishes, on_done(result) fires from a background thread.
 """
@@ -49,8 +49,8 @@ class LargeBrain:
 
     def _run_job(self, job: dict) -> str:
         job_id = str(uuid.uuid4())[:8]
-        job_path = tempfile.mktemp(prefix=f"zeus_job_{job_id}_", suffix=".json")
-        result_path = tempfile.mktemp(prefix=f"zeus_result_{job_id}_", suffix=".json")
+        job_path = tempfile.mktemp(prefix=f"zelia_job_{job_id}_", suffix=".json")
+        result_path = tempfile.mktemp(prefix=f"zelia_result_{job_id}_", suffix=".json")
 
         with open(job_path, "w") as f:
             json.dump({"prompt": job["prompt"], "model": job["model"], "compression": job["compression"]}, f)

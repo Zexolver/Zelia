@@ -1,4 +1,4 @@
-"""Shared logging setup for every ZEUS component."""
+"""Shared logging setup for every ZELIA component."""
 import logging
 import os
 from logging.handlers import RotatingFileHandler

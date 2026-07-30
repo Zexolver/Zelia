@@ -1,0 +1,163 @@
+# ZELIA configuration
+# Values wrapped in {{ }} are filled in automatically by install.sh.
+# Everything here can be hand-edited later at any time.
+
+install_dir: "{{INSTALL_DIR}}"
+
+# ---------------------------------------------------------------------------
+# Identity / voice
+# ---------------------------------------------------------------------------
+assistant:
+  name: "ZELIA"
+
+  # Two wake word engines are supported -- currently defaulting to
+  # openWakeWord ("hey jarvis") because it's guaranteed free and needs no
+  # account, while Porcupine's current free-tier terms for custom wake
+  # words are genuinely unclear (their docs and third-party pricing pages
+  # disagree with each other as of this writing -- see README's "Custom
+  # wake word" section before switching engines).
+  #   - "openwakeword": fully local/offline, no account needed, ships stock
+  #     phrases only (alexa / hey mycroft / hey jarvis / etc) -- no "hey
+  #     zelia" model exists for it without a much more involved local
+  #     training pipeline.
+  #   - "porcupine": Picovoice Porcupine. Their GitHub repo states personal/
+  #     non-commercial accounts can train custom models for free, but
+  #     other current sources describe custom wake words as Enterprise-
+  #     only -- worth checking yourself at console.picovoice.ai (free
+  #     signup, no card) before relying on it.
+  wake_word_engine: "openwakeword"
+  wake_word: "hey jarvis"
+  openwakeword_model: "hey_jarvis"
+  wake_word_threshold: 0.5
+
+  # Porcupine settings, used only if wake_word_engine is switched to "porcupine":
+  wake_word_model_path: "{{INSTALL_DIR}}/models/wakeword/hey-zelia.ppn"   # from Picovoice console
+  picovoice_access_key: ""    # paste your free key here (picovoice.ai console)
+
+# ---------------------------------------------------------------------------
+# Push-to-talk hotkey
+#
+# A second, non-voice way to activate ZELIA -- reads raw keyboard events via
+# evdev (kernel level, works identically on Xorg and Wayland, no compositor-
+# specific hacks needed). Useful when the wake word itself would be
+# unreliable, e.g. talking quietly/whispering late at night -- press the
+# key, then just talk normally at whatever volume; the wake word audio
+# classifier is skipped entirely, only VAD-based recording + Whisper are
+# used, which handle quiet speech far better than a phrase detector tuned
+# for normal volume does.
+# ---------------------------------------------------------------------------
+hotkey:
+  enabled: true
+  key: "KEY_SCROLLLOCK"   # rarely used for anything else; see README to pick a different one
+
+# ---------------------------------------------------------------------------
+# Speech-to-text (Whisper via faster-whisper)
+# ---------------------------------------------------------------------------
+stt:
+  model_size: "small"       # tiny/base/small are realistic on 8GB VRAM alongside everything else
+  device: "auto"             # auto-detects: NVIDIA -> cuda, AMD/none -> cpu (see src/gpu_detect.py --
+                              # Whisper's backend, CTranslate2, has no ROCm/Vulkan path)
+  compute_type: "int8_float16"
+
+# ---------------------------------------------------------------------------
+# Text-to-speech (Piper)
+# ---------------------------------------------------------------------------
+tts:
+  voice: "en_US-amy-medium"   # female voice, runs on CPU so it never competes for VRAM
+  speaking_rate: 1.0
+
+# ---------------------------------------------------------------------------
+# Brains
+# ---------------------------------------------------------------------------
+brains:
+  small:
+    # Fast, always-loaded model for normal conversation & simple commands.
+    # Served locally through Ollama.
+    provider: "ollama"
+    model: "qwen2.5:7b-instruct-q4_K_M"
+    host: "http://127.0.0.1:11434"
+
+  large:
+    # Used for big/quality-sensitive project work (large coding tasks, etc).
+    # Runs via AirLLM so it can fit on limited VRAM by streaming layers from disk.
+    provider: "airllm"
+    model: "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    compression: "4bit"        # cuts disk/VRAM footprint further; set to null for full precision
+    max_new_tokens: 2048
+
+# ---------------------------------------------------------------------------
+# GPU budget
+#
+# Vendor and total VRAM are auto-detected (src/gpu_detect.py) -- nothing
+# here needs to be hardcoded to a specific card. The small brain and STT (on
+# NVIDIA) stay resident essentially all the time. AirLLM is capped to
+# whatever VRAM remains so a big project running in the background never
+# starves ZELIA of what she needs to keep answering quick questions -- but
+# that cap only applies where AirLLM actually gets GPU acceleration at all.
+# On AMD cards ROCm no longer supports (e.g. this project's reference
+# hardware, an RX 580/Polaris), that's CPU-only for AirLLM. Ollama (small
+# brain + vision model) still gets real acceleration via Vulkan on AMD --
+# install.sh sets that up automatically. See README's GPU section for
+# details and the optional advanced path if you want to chase full ROCm
+# acceleration on an unsupported card yourself.
+# ---------------------------------------------------------------------------
+gpu:
+  total_vram_mb: null          # null = auto-detect (nvidia-smi on NVIDIA, sysfs/rocm-smi on AMD)
+  reserved_for_small_brain_mb: 3072   # headroom kept free for small brain + STT + TTS overhead
+  airllm_max_fraction: null    # auto-computed as (total - reserved) / total if left null
+
+# ---------------------------------------------------------------------------
+# Second brain (long-term memory)
+# ---------------------------------------------------------------------------
+memory:
+  db_path: "{{INSTALL_DIR}}/memory/chroma"
+  embedding_model: "all-MiniLM-L6-v2"
+  auto_capture: true            # every conversation turn is summarized & stored automatically
+  retrieval_top_k: 5
+
+# ---------------------------------------------------------------------------
+# Gaming priority
+#
+# ZELIA watches for running games (by process name) or any non-ZELIA process
+# hammering the GPU. While that's true: new AirLLM big-project jobs are
+# queued instead of started (they resume automatically once gaming stops),
+# and ZELIA's own process is reniced down so she doesn't compete for CPU time.
+# Wake word + quick commands keep working the whole time either way.
+# ---------------------------------------------------------------------------
+gaming:
+  poll_interval_seconds: 5
+  extra_process_patterns: []   # add your own, e.g. ["cs2", "valorant.exe"]
+  normal_nice: 0
+  gaming_nice: 10              # higher = lower priority; 19 is the max
+
+# ---------------------------------------------------------------------------
+# Screen / vision
+# ---------------------------------------------------------------------------
+screen:
+  vision_model: "moondream"    # small local vision-language model, pulled via Ollama,
+                                # loaded on demand for describe_screen (not resident)
+
+# ---------------------------------------------------------------------------
+# Desktop control
+#
+# Shell/git/coding commands run in a real, visible terminal window by
+# default (src/agent/tools/desktop_control.py) so you can watch what's
+# happening -- only use the quiet/background path when you explicitly ask
+# for it. Works on both Xorg (xdotool/wmctrl) and Wayland (ydotool, plus
+# best-effort window focus on wlroots compositors like Sway/Hyprland).
+# ---------------------------------------------------------------------------
+desktop:
+  default_browser: "floorp"    # say "use <browser> for this" to override once,
+                                 # or "always use <browser>" to change this permanently
+
+# ---------------------------------------------------------------------------
+# Agent / tools
+# ---------------------------------------------------------------------------
+agent:
+  tools_enabled: ["shell", "files", "browser", "code"]
+  confirm_before_destructive: true   # delete/overwrite/system-altering commands ask first
+  workspace_dir: "{{INSTALL_DIR}}/workspace"
+
+logging:
+  level: "INFO"
+  path: "{{INSTALL_DIR}}/logs/zelia.log"

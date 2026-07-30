@@ -3,7 +3,7 @@ import os
 import yaml
 
 _DEFAULT_PATH = os.environ.get(
-    "ZEUS_CONFIG",
+    "ZELIA_CONFIG",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "config.yaml"),
 )
 

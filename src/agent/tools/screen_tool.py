@@ -31,7 +31,7 @@ def _session_type() -> str:
 
 def take_screenshot() -> str:
     """Returns a path to a freshly captured PNG screenshot."""
-    path = tempfile.mktemp(prefix="zeus_screenshot_", suffix=".png")
+    path = tempfile.mktemp(prefix="zelia_screenshot_", suffix=".png")
     session = _session_type()
 
     if session == "wayland" and _has("grim"):

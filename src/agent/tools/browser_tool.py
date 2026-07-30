@@ -12,7 +12,7 @@ from src.utils.logger import get_logger
 
 log = get_logger("browser_tool")
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ZEUSAgent/1.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ZELIAAgent/1.0"}
 
 
 def fetch_url(url: str, max_chars: int = 6000) -> dict:

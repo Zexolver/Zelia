@@ -1,5 +1,5 @@
 """
-ZEUS's main loop:
+ZELIA's main loop:
 
   wake word -> record -> transcribe -> agent (tools + routing) -> speak
 
@@ -35,7 +35,7 @@ def build_confirmation_asker(stt: SpeechToText, tts: TextToSpeech):
 
 
 def start_priority_manager(game_guard: GameGuard, normal_nice: int, gaming_nice: int, poll_seconds: float = 5.0):
-    """Lowers ZEUS's own process priority while a game is running, restores it after."""
+    """Lowers ZELIA's own process priority while a game is running, restores it after."""
     try:
         import psutil
         proc = psutil.Process(os.getpid())
@@ -52,7 +52,7 @@ def start_priority_manager(game_guard: GameGuard, normal_nice: int, gaming_nice:
                 try:
                     proc.nice(target)
                     current = target
-                    log.info("Adjusted ZEUS's process priority (nice=%s) for %s", target, "gaming" if gaming else "normal use")
+                    log.info("Adjusted ZELIA's process priority (nice=%s) for %s", target, "gaming" if gaming else "normal use")
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Could not renice: %s", exc)
             time.sleep(poll_seconds)
@@ -63,7 +63,7 @@ def start_priority_manager(game_guard: GameGuard, normal_nice: int, gaming_nice:
 def main():
     cfg = load_config()
 
-    log.info("Starting ZEUS (install dir: %s)", cfg.install_dir)
+    log.info("Starting ZELIA (install dir: %s)", cfg.install_dir)
 
     stt = SpeechToText(
         model_size=cfg.stt.model_size,
@@ -104,7 +104,7 @@ def main():
         vision_model=cfg.screen.get("vision_model", "moondream"),
         ollama_host=cfg.brains.small.host,
         default_browser=cfg.desktop.get("default_browser", "floorp"),
-        config_path=os.environ.get("ZEUS_CONFIG", f"{cfg.install_dir}/config/config.yaml"),
+        config_path=os.environ.get("ZELIA_CONFIG", f"{cfg.install_dir}/config/config.yaml"),
     )
 
     activation_lock = threading.Lock()
@@ -133,10 +133,10 @@ def main():
         listener = build_wake_word_listener(cfg)
     except Exception as exc:
         log.error("Could not start the wake word engine: %s", exc)
-        log.error("See README.md, section 'Custom wake word', to finish setting up 'hey zeus'.")
+        log.error("See README.md, section 'Wake word (and a faster alternative for quiet moments)', to finish setting up 'hey zelia'.")
         sys.exit(1)
 
-    log.info("ZEUS is ready. Say '%s', or press your push-to-talk hotkey.", cfg.assistant.wake_word)
+    log.info("ZELIA is ready. Say '%s', or press your push-to-talk hotkey.", cfg.assistant.wake_word)
     try:
         listener.listen_forever(on_wake)
     except KeyboardInterrupt:

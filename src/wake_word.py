@@ -2,10 +2,10 @@
 Always-listening wake word detector. Two backends, picked via
 config.yaml's assistant.wake_word_engine:
 
-  - "porcupine": Picovoice Porcupine, supports a real trained "hey zeus"
+  - "porcupine": Picovoice Porcupine, supports a real trained "hey zelia"
     phrase (see README's "Custom wake word" section for the ~5 minute setup).
   - "openwakeword": fully local/offline, but only stock phrases are
-    available (no "hey zeus" model exists for it out of the box).
+    available (no "hey zelia" model exists for it out of the box).
 """
 import numpy as np
 import sounddevice as sd

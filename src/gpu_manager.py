@@ -4,7 +4,7 @@ gets GPU acceleration in the first place (see gpu_detect.py: that's NVIDIA
 only in this project's setup; on AMD, AirLLM runs on CPU regardless of this
 budget, since there's no usable ROCm PyTorch path for older cards).
 
-Zeus's small/fast brain (served by Ollama) and the STT model stay resident
+Zelia's small/fast brain (served by Ollama) and the STT model stay resident
 on the GPU basically all the time so she can keep responding to quick
 questions and simple commands. AirLLM only gets whatever VRAM is left over
 after that reservation, and it runs in its own subprocess with a hard

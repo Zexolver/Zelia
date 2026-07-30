@@ -1,5 +1,5 @@
 """
-Push-to-talk hotkey -- a second way to activate ZEUS besides the wake word.
+Push-to-talk hotkey -- a second way to activate ZELIA besides the wake word.
 
 Reads raw keyboard events straight from the kernel via evdev (the same
 'input' group access install.sh sets up for ydotool), which is why this

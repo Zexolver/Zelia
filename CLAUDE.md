@@ -19,14 +19,15 @@ not just for coding" — full agent capability (files, shell, GUI apps, web),
 not a chatbot.
 
 **Current name: ZELIA** ("Zexolver's Enhanced Learning & Intelligence
-Assistant," female voice). **The codebase still says "ZEUS" everywhere**
-(an earlier name) — renaming ZEUS → ZELIA throughout the codebase, configs,
-service names, and docs is the first thing to do. Do a careful global
-rename (code, strings, filenames like `zeus.service`, default install path
-`~/.zeus`, env var `ZEUS_CONFIG`, etc.) — see "Known issues" below, there's
-precedent for exactly this kind of rename having been done once already
-(Zeya → ZEUS) so check for stray references in comments too, not just
-obvious identifiers.
+Assistant," female voice). The codebase originally said "ZEUS" everywhere
+(an earlier name) — that rename (ZEUS → ZELIA throughout code, strings,
+filenames like `zeus.service` → `zelia.service`, default install path
+`~/.zeus` → `~/.zelia`, env var `ZEUS_CONFIG` → `ZELIA_CONFIG`, etc.) has
+now been done as a global pass across `src/`, `README.md`, and the config
+template. There's precedent for exactly this kind of rename having been
+done once already (Zeya → ZEUS), so if you spot a stray reference to
+"zeus"/"ZEUS" anywhere (comments, error strings, a file nobody thought to
+grep) treat it as a bug and fix it the same way, don't leave it.
 
 ## Target environment / hardware
 
@@ -136,8 +137,10 @@ pointing at a dedicated drive), auto-detects GPU vendor, installs system
 packages + Ollama + Vulkan drivers (if AMD) + ydotool + a
 custom-built `ydotoold` systemd `--user` service (the Arch package ships no
 usable unit), pulls the small + vision models, sets up
-`config/config.yaml` from the template, and creates a `zeus.service`
-(pending rename) systemd `--user` unit.
+`config/config.yaml` from the template, and creates + immediately
+starts/enables a `zelia.service` systemd `--user` unit
+(`systemctl --user enable --now`), so the install is actually finished —
+ZELIA running — when the script exits.
 
 ## Philosophy / non-negotiable design principles
 
@@ -165,19 +168,21 @@ preserve them:
    underperforming; `install.sh`'s final summary states plainly what's
    accelerated vs. not.
 
-## Known issues (fix these)
+## Known issues
 
-1. **Full ZEUS → ZELIA rename** needed throughout (see above).
-2. **install.sh doesn't auto-start the service.** It prints the
-   `systemctl --user start/enable` commands instead of running them. Should
-   end with `systemctl --user enable --now <service>` so the install is
-   actually done when the script finishes.
-3. **install.sh's final wake-word warning is stale.** It was written when
-   Porcupine was the default and still talks like there's *no* working wake
-   word without Picovoice setup. Should instead say something like: "hey
-   jarvis" works right now by default; "hey zelia" via Porcupine is
-   optional, check console.picovoice.ai yourself given their unclear
-   current free-tier terms (see wake_word.py comments).
+Resolved:
+
+1. ~~Full ZEUS → ZELIA rename~~ — done, see above.
+2. ~~install.sh doesn't auto-start the service~~ — `install.sh` now ends
+   with `systemctl --user enable --now zelia.service` (and the same for
+   `ydotoold.service` earlier in the script) instead of just printing the
+   commands.
+3. ~~install.sh's final wake-word warning is stale~~ — the final summary
+   now correctly says "hey jarvis" works right now by default and "hey
+   zelia" via Porcupine is optional, with the console.picovoice.ai caveat.
+
+Still open:
+
 4. `press_key`'s Wayland path (`desktop_control.py`, `YDOTOOL_KEYS`) only
    has a handful of key combos mapped — extend as needed.
 5. Window focus has no implementation on GNOME/KDE Wayland (no standard API
@@ -203,7 +208,7 @@ Roughly in the order the user raised them:
    more precision is wanted later.
 3. **Self-diagnostics** — the user wants ZELIA to be able to check her own
    health/logs and self-correct when told to. Currently only possible
-   ad-hoc (she *can* run `journalctl --user -u zeus` etc. via her shell
+   ad-hoc (she *can* run `journalctl --user -u zelia` etc. via her shell
    tools if she reasons to, but there's no dedicated tool or system-prompt
    nudge making this a reliable, proactive behavior).
 4. **Claude.ai browser integration** was discussed (open Floorp, drive it

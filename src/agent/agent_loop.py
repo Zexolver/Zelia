@@ -44,7 +44,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file inside ZEUS's workspace.",
+            "description": "Read a file inside ZELIA's workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -56,7 +56,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create or overwrite a file inside ZEUS's workspace.",
+            "description": "Create or overwrite a file inside ZELIA's workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -68,7 +68,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Delete a file inside ZEUS's workspace.",
+            "description": "Delete a file inside ZELIA's workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -92,7 +92,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_code",
-            "description": "Run a command (e.g. 'python3 script.py') inside ZEUS's workspace directory. Runs in a visible terminal by default; pass quiet=true only if asked to run it in the background.",
+            "description": "Run a command (e.g. 'python3 script.py') inside ZELIA's workspace directory. Runs in a visible terminal by default; pass quiet=true only if asked to run it in the background.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -348,7 +348,7 @@ class AgentLoop:
             {
                 "role": "system",
                 "content": (
-                    "You are ZEUS, a helpful voice-controlled assistant running entirely "
+                    "You are ZELIA, a helpful voice-controlled assistant running entirely "
                     "locally on the user's Linux machine -- no cloud services, no MCP "
                     "servers, just direct access to the machine you're running on.\n\n"
                     "Important behavior rules:\n"
