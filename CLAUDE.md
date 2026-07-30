@@ -12,11 +12,16 @@ that currently has `install.sh`, `src/`, `config/`, etc. in it) and run
 
 ## What this project is
 
-A local, voice-controlled personal agent for Manjaro/Arch Linux. No cloud
-LLM, no subscription, no MCP servers — everything runs on the user's own
-machine. Originally scoped as "a free Claude Code but voice-controlled and
-not just for coding" — full agent capability (files, shell, GUI apps, web),
-not a chatbot.
+A local, voice-and-text-controlled personal agent for Manjaro/Arch Linux —
+the "Jarvis" people show off in tech-demo videos, actually running on your
+own machine instead of a cloud API. No cloud LLM, no subscription, no MCP
+servers. Originally scoped as "a free Claude Code but voice-controlled and
+not just for coding" — the goal is full, general-purpose agent capability
+(files, shell, GUI apps, web, desktop control, screen vision) applied to
+*anything* the user wants done on their machine, not a narrow chatbot and
+not limited to coding tasks. When judging whether a capability belongs
+here, default to "yes, a Jarvis-like assistant should be able to do this"
+rather than scoping it down.
 
 **Current name: ZELIA** ("Zexolver's Enhanced Learning & Intelligence
 Assistant," female voice). The codebase originally said "ZEUS" everywhere
@@ -80,6 +85,34 @@ each activation starts a fresh message list, with only semantically-recalled
 memories as context. If a true continuous-session mode gets built later
 (see Pending features), keep this always-on background memory too.
 
+**Efficiency is the explicit, stated priority for this component** — above
+recall quality, above features. Two concrete changes made for that reason,
+keep this direction for anything added here later:
+- Embeddings use chromadb's built-in ONNX-runtime MiniLM-L6-v2
+  (`DefaultEmbeddingFunction`) instead of the sentence-transformers/torch
+  path — same model, faster CPU inference for the single-sequence embed
+  this does on every turn, and it doesn't need torch just for this. Falls
+  back to sentence-transformers only if `memory.embedding_model` in
+  config.yaml is changed away from the default `all-MiniLM-L6-v2`.
+- `remember()` is fire-and-forget: writes go on a queue drained by one
+  background thread instead of blocking the conversation on an embed +
+  disk write before the user hears/sees a reply. `recall()` stays
+  synchronous since the agent needs it before it can build a prompt —
+  that's the one part that's inherently on the critical path and not a
+  target for further optimization without changing that requirement.
+
+**Text input** (`src/text_input.py` + `src/text_repl.py`): typed keyboard
+input, not just STT — the main process listens on a Unix socket
+(`<install_dir>/zelia.sock`) rather than reading its own stdin (it usually
+runs headless under systemd, no attached terminal). `text_repl.py` is a
+thin client with no brain/tool logic of its own — connect from any
+terminal, any time, with `python -m src.text_repl` (or `zelia-say` if
+installed via the pacman package). Wired through the exact same
+`agent.handle_request` path and `activation_lock` as voice in
+`src/main.py`'s `on_text`, so voice and typed requests serialize rather
+than racing, and replies go out both spoken (TTS) and back over the
+socket.
+
 **Full agent tool set** (`src/agent/agent_loop.py` + `src/agent/tools/`):
 - File read/write/delete, scoped to `agent.workspace_dir` (`file_tool.py`)
 - **Visible-by-default execution** — this is a core design principle, see
@@ -132,15 +165,55 @@ quietly/whispering (e.g. late at night) — pressing the hotkey skips wake
 word audio classification entirely and goes straight to
 VAD-recording + Whisper, which handle quiet speech far better.
 
-**Install** (`install.sh`): prompts for install directory (supports
-pointing at a dedicated drive), auto-detects GPU vendor, installs system
-packages + Ollama + Vulkan drivers (if AMD) + ydotool + a
+**Install, from source** (`install.sh`): prompts for install directory
+(supports pointing at a dedicated drive), auto-detects GPU vendor, installs
+system packages + Ollama + Vulkan drivers (if AMD) + ydotool + a
 custom-built `ydotoold` systemd `--user` service (the Arch package ships no
 usable unit), pulls the small + vision models, sets up
 `config/config.yaml` from the template, and creates + immediately
 starts/enables a `zelia.service` systemd `--user` unit
 (`systemctl --user enable --now`), so the install is actually finished —
-ZELIA running — when the script exits.
+ZELIA running — when the script exits. Still works, still useful for
+development, but **not the primary install path any more** — see
+"Packaging & releases" below.
+
+## Packaging & releases
+
+Explicit user requirement: every release, both stable and
+debugging/testing builds, gets built into an Arch pacman package
+(`.pkg.tar.zst`) so a user only ever has to install a package, not
+manually run a shell script. (A `.deb` was mentioned once and then
+explicitly retracted — this project only targets Arch-based distros,
+there is no Debian/Ubuntu packaging and none should be added.)
+
+Built under `packaging/`:
+- `packaging/stable/PKGBUILD` → package `zelia`, built from a tagged
+  GitHub release (`v<pkgver>`). The stable-release path.
+- `packaging/testing/PKGBUILD` → package `zelia-git`, always tracks the
+  latest commit on `main`, version auto-derived via `git describe`
+  (standard Arch `-git` package convention). The debugging/testing path —
+  build this to try a change before cutting a release. `zelia` and
+  `zelia-git` `conflict`/can't coexist.
+- Both install `src/`, the config/systemd templates, and a prebuilt venv
+  to `/opt/zelia` (owned by pacman, read-only, shared), plus
+  `/usr/bin/zelia-setup` (per-user first-run: `~/.zelia` data dir,
+  rendered `config.yaml`, `ollama pull`, the systemd `--user` service,
+  `input` group for ydotool — everything `/opt/zelia` itself can't know
+  because it doesn't know which user(s) will run ZELIA) and
+  `/usr/bin/zelia-say` (typed input from anywhere, see "Second brain"
+  above for what it connects to).
+- `makepkg`'s default compression is already zstd, so building either
+  PKGBUILD with a stock `makepkg.conf` produces `.pkg.tar.zst` — no extra
+  flags needed. Verified end-to-end once (`makepkg -o` in
+  `packaging/testing`, source fetch + `pkgver()` against the real GitHub
+  repo both resolved correctly) but a full `makepkg -si` (pulls torch,
+  chromadb, airllm into the build venv, several GB) hasn't been run in
+  this environment — worth doing before calling a release good.
+- See `packaging/README.md` for the build/release commands.
+
+This is a meaningful scope split going forward: system packages + shared
+code are pacman's job now; only genuinely per-user state should ever go
+through `install.sh`/`zelia-setup`-style scripting.
 
 ## Philosophy / non-negotiable design principles
 
@@ -190,44 +263,40 @@ Still open:
 
 ## Pending features (not yet built)
 
-Roughly in the order the user raised them:
+Roughly in the order the user raised them. (Text-chat input mode, formerly
+listed here, is done — see "Second brain" above for `text_input.py`/
+`text_repl.py`.)
 
-1. **Text-chat input mode.** Type into a text box, get a response back as
-   both text and TTS — same agent backend as voice, just a second input
-   path, for when the user doesn't want to talk at all. No UI decision made
-   yet (options: simple local web UI, a lightweight desktop text widget, a
-   terminal REPL — pick something that doesn't add heavy new deps given the
-   "detect, don't hardcode" and "keep it lightweight for 8GB VRAM" spirit
-   of the rest of the project).
-2. **GUI automation is currently generic/best-effort**, not app-specific.
+1. **GUI automation is currently generic/best-effort**, not app-specific.
    The user wants to be able to use Godot's editor (and other complex GUI
    apps) through ZELIA — current tools (`find_text_on_screen` + `click_at`
    + `type_text`/`press_key`) are screenshot-and-guess, functional for
    simple things ("click Play," "open the Script tab") but clunky for
    precise work. No accessibility-API (AT-SPI) integration exists yet if
    more precision is wanted later.
-3. **Self-diagnostics** — the user wants ZELIA to be able to check her own
+2. **Self-diagnostics** — the user wants ZELIA to be able to check her own
    health/logs and self-correct when told to. Currently only possible
    ad-hoc (she *can* run `journalctl --user -u zelia` etc. via her shell
    tools if she reasons to, but there's no dedicated tool or system-prompt
    nudge making this a reliable, proactive behavior).
-4. **Claude.ai browser integration** was discussed (open Floorp, drive it
+3. **Claude.ai browser integration** was discussed (open Floorp, drive it
    to claude.ai, type/read via the desktop-control + OCR primitives) but
    not built — no dedicated tool exists for this specific workflow yet,
    would be composed from existing `open_browser` + `type_text`/`press_key`
    + `find_text_on_screen`/`describe_screen` primitives.
-5. A genuine Claude API tier (as a third brain option) was discussed and
+4. A genuine Claude API tier (as a third brain option) was discussed and
    explicitly **not** added — the user was told this is the one piece that
    wouldn't be free, and no decision was made either way.
 
 ## Config reference
 
-`config/config.yaml.template` → filled in by `install.sh` → `config/config.yaml`.
-Key sections: `assistant` (wake word engine/model), `hotkey`, `stt`, `tts`,
-`brains` (small/large), `gpu`, `gaming`, `screen`, `desktop`
-(default_browser), `agent` (workspace_dir, confirm_before_destructive),
-`memory`, `logging`. Read the template's inline comments — they carry a lot
-of the "why," not just the "what."
+`config/config.yaml.template` → filled in by `install.sh` (from-source) or
+`zelia-setup` (packaged install) → `config/config.yaml`. Key sections:
+`assistant` (wake word engine/model), `hotkey`, `stt`, `tts`, `brains`
+(small/large), `gpu`, `gaming`, `screen`, `desktop` (default_browser),
+`agent` (workspace_dir, confirm_before_destructive), `memory`, `logging`.
+Read the template's inline comments — they carry a lot of the "why," not
+just the "what."
 
 ## Notes for how to work on this codebase
 

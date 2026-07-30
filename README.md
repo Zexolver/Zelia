@@ -1,13 +1,17 @@
 # ZELIA
 
-A local, voice-controlled personal agent for Manjaro/Arch. No cloud, no
-subscription -- everything runs on your machine.
+A local, voice-and-text-controlled personal agent for Manjaro/Arch. No
+cloud, no subscription -- everything runs on your machine.
 
 ## What she does
 
 - **Always listening** for a wake word (default "hey jarvis" -- see below),
   or press a push-to-talk hotkey instead (better for talking quietly).
   Transcribes what you say (Whisper) and talks back out loud (Piper TTS).
+- **Or just type to her.** `zelia-say` (or `python -m src.text_repl` from
+  source) opens a terminal chat with the exact same brains/tools/memory as
+  voice -- no need to talk at all. Works from any terminal, any time, not
+  tied to whichever one started the service. See "Typed input" below.
 - **Two brains:**
   - A small, fast model (served by Ollama) handles normal conversation and
     quick commands instantly.
@@ -40,7 +44,10 @@ subscription -- everything runs on your machine.
   address bar. Say "use X for this" or "always use X" to change it.
 - **Second brain:** a local vector database (ChromaDB) that automatically
   stores and embeds every conversation turn -- no manual note-taking. Future
-  requests automatically pull back relevant past context.
+  requests automatically pull back relevant past context. Built for
+  efficiency first: ONNX-runtime embeddings and writes happen on a
+  background thread so remembering something never adds latency to your
+  answer.
 - **Sees your screen:** `read_screen_text` OCRs whatever's visible (fast, no
   GPU) and `describe_screen` uses a small local vision model (moondream, via
   Ollama, loaded only when asked) for questions about layout/images.
@@ -60,22 +67,31 @@ subscription -- everything runs on your machine.
 
 ## Install
 
+**Package (recommended):** see `packaging/README.md`. Build/install the
+`zelia` (stable) or `zelia-git` (tracks `main`, for testing) pacman
+package, then run `zelia-setup` once as yourself -- it creates `~/.zelia`,
+writes `config.yaml`, pulls the models, and starts the systemd `--user`
+service.
+
+**From source (development):**
+
 ```bash
 git clone git@github.com:Zexolver/Zelia.git
 cd Zelia
 ./install.sh
 ```
 
-The installer will ask where to install her (defaults to `~/.zelia`, but you
-can point it at a dedicated SSD mount point) and handles everything else:
-system packages, Ollama, Python environment, the small conversation model,
-ZELIA's voice, and a systemd `--user` service -- it starts and enables that
-service itself, so ZELIA is already running by the time the script finishes.
+Asks where to install her (defaults to `~/.zelia`, but you can point it at
+a dedicated SSD mount point) and handles everything else: system packages,
+Ollama, Python environment, the small conversation model, ZELIA's voice,
+and a systemd `--user` service -- it starts and enables that service
+itself, so ZELIA is already running by the time the script finishes.
 
 ```bash
 systemctl --user status zelia     # check she's running
 systemctl --user restart zelia    # restart after editing config.yaml
 journalctl --user -u zelia -f     # watch logs / see what she's doing
+zelia-say                         # or `python -m src.text_repl` from source -- type to her
 ```
 
 ## Wake word (and a faster alternative for quiet moments)
@@ -220,15 +236,18 @@ in the first place -- see "GPU support" above.)
 ## Project layout
 
 ```
-install.sh                     top-level installer
+install.sh                     from-source installer (dev use; packaging/ is the primary install path)
+packaging/                     PKGBUILDs (stable + testing/-git), zelia-setup, zelia-say -- see packaging/README.md
 requirements.txt
-config/config.yaml.template    filled in by install.sh -> config/config.yaml
-systemd/zelia.service.template  filled in by install.sh -> ~/.config/systemd/user/zelia.service
-systemd/ydotoold.service.template  filled in by install.sh -> ~/.config/systemd/user/ydotoold.service
+config/config.yaml.template    filled in by install.sh/zelia-setup -> config/config.yaml
+systemd/zelia.service.template  filled in by install.sh/zelia-setup -> ~/.config/systemd/user/zelia.service
+systemd/ydotoold.service.template  filled in by install.sh/zelia-setup -> ~/.config/systemd/user/ydotoold.service
 src/
-  main.py                      wake word + hotkey -> STT -> agent -> TTS loop
+  main.py                      wake word + hotkey + typed input -> STT/text -> agent -> TTS + text loop
   wake_word.py                 Porcupine ("hey zelia") + openWakeWord listeners
   hotkey_listener.py           push-to-talk key (evdev, Xorg+Wayland alike)
+  text_input.py                Unix-socket text channel the main process listens on
+  text_repl.py                 terminal client for text_input.py (`python -m src.text_repl` / `zelia-say`)
   stt.py                       faster-whisper
   tts.py                       Piper
   config.py                    config.yaml loader
@@ -241,7 +260,7 @@ src/
     large_brain.py             spawns AirLLM worker subprocess, async, game-aware queue
     airllm_worker.py           actual AirLLM subprocess entry point
   memory/
-    second_brain.py            ChromaDB long-term memory, auto-capture
+    second_brain.py            ChromaDB long-term memory, auto-capture, ONNX embeddings, async writes
   agent/
     agent_loop.py               tool-calling loop + confirmation flow
     tools/
