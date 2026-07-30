@@ -1,0 +1,15 @@
+post_install() {
+    echo "==> ZELIA is installed to /opt/zelia."
+    echo "==> Run 'zelia-setup' as your normal user (NOT root/sudo) to finish setup:"
+    echo "    creates ~/.zelia, writes config.yaml from the template, pulls the"
+    echo "    Ollama models, installs and starts the systemd --user service."
+}
+
+post_upgrade() {
+    echo "==> ZELIA was upgraded. Restart her to pick it up: systemctl --user restart zelia"
+}
+
+post_remove() {
+    echo "==> /opt/zelia removed. Your ~/.zelia (config/memory/models/logs) was left"
+    echo "    alone -- remove it yourself if you want a completely clean slate."
+}

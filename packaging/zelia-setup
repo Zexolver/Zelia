@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Per-user setup for the ZELIA pacman package. Run once, as your normal
+# user (not root), after installing the zelia or zelia-git package.
+#
+# The package itself (/opt/zelia) only contains code + a bundled venv --
+# it's shared, read-only, owned by pacman. This script does the part that
+# has to be per-user: your own ~/.zelia data dir, your own config.yaml,
+# your own systemd --user service.
+set -euo pipefail
+
+APP_DIR="/opt/zelia"
+if [ ! -d "$APP_DIR" ]; then
+    echo "ZELIA package not found at $APP_DIR -- install the zelia or zelia-git package first."
+    exit 1
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Run this as your normal user, not root -- it sets up systemd --user and your \$HOME."
+    exit 1
+fi
+
+read -rp "Data directory [default: $HOME/.zelia]: " INSTALL_DIR
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.zelia}"
+INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+mkdir -p "$INSTALL_DIR"/{config,models/piper,models/wakeword,memory,logs,workspace}
+echo "Data directory: $INSTALL_DIR"
+echo
+
+# GPU vendor auto-detect -- same logic as src/gpu_detect.py uses at
+# runtime, never hardcoded (see CLAUDE.md's "Detect, don't hardcode").
+GPU_VENDOR="none"
+if command -v lspci >/dev/null 2>&1; then
+    if lspci | grep -i 'vga\|3d\|display' | grep -qi nvidia; then
+        GPU_VENDOR="nvidia"
+    elif lspci | grep -i 'vga\|3d\|display' | grep -qi 'amd\|advanced micro devices\|ati'; then
+        GPU_VENDOR="amd"
+    fi
+fi
+echo "Detected GPU vendor: $GPU_VENDOR"
+if [ "$GPU_VENDOR" = "amd" ] && ! grep -q '^OLLAMA_VULKAN=1' /etc/environment 2>/dev/null; then
+    echo 'OLLAMA_VULKAN=1' | sudo tee -a /etc/environment >/dev/null
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# ydotoold systemd --user service (the Arch ydotool package ships no usable
+# unit) + `input` group membership.
+# ---------------------------------------------------------------------------
+mkdir -p "$HOME/.config/systemd/user"
+YDOTOOLD_BIN="$(command -v ydotoold || echo /usr/bin/ydotoold)"
+sed "s|{{YDOTOOLD_BIN}}|$YDOTOOLD_BIN|g" \
+    "$APP_DIR/systemd/ydotoold.service.template" \
+    > "$HOME/.config/systemd/user/ydotoold.service"
+
+NEEDS_RELOGIN=0
+if ! groups "$USER" | grep -qw input; then
+    sudo usermod -aG input "$USER"
+    NEEDS_RELOGIN=1
+fi
+
+# ---------------------------------------------------------------------------
+# Ollama + models
+# ---------------------------------------------------------------------------
+if ! command -v ollama >/dev/null 2>&1; then
+    echo "Ollama not found. Install it first:"
+    echo "  curl -fsSL https://ollama.com/install.sh | sh"
+    echo "then re-run zelia-setup."
+    exit 1
+fi
+sudo systemctl enable --now ollama 2>/dev/null || true
+echo "--- Pulling models (this can take a while) ---"
+ollama pull qwen2.5:7b-instruct-q4_K_M
+ollama pull moondream
+if [ ! -f "$INSTALL_DIR/models/piper/en_US-amy-medium.onnx" ]; then
+    curl -fsSL -o "$INSTALL_DIR/models/piper/en_US-amy-medium.onnx" \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx"
+    curl -fsSL -o "$INSTALL_DIR/models/piper/en_US-amy-medium.onnx.json" \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json"
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+if [ -f "$INSTALL_DIR/config/config.yaml" ]; then
+    echo "config/config.yaml already exists, leaving it alone."
+else
+    sed "s|{{INSTALL_DIR}}|$INSTALL_DIR|g" \
+        "$APP_DIR/config/config.yaml.template" \
+        > "$INSTALL_DIR/config/config.yaml"
+fi
+
+# ---------------------------------------------------------------------------
+# ZELIA's own systemd --user service. Code + venv live in the shared,
+# read-only /opt/zelia package; ZELIA_CONFIG points her at this user's own
+# data dir.
+# ---------------------------------------------------------------------------
+sed -e "s|{{INSTALL_DIR}}|$APP_DIR|g" \
+    -e "s|Environment=ZELIA_CONFIG=.*|Environment=ZELIA_CONFIG=$INSTALL_DIR/config/config.yaml|" \
+    "$APP_DIR/systemd/zelia.service.template" \
+    > "$HOME/.config/systemd/user/zelia.service"
+
+systemctl --user daemon-reload
+systemctl --user enable --now ydotoold.service zelia.service
+
+echo
+echo "=== Done ==="
+echo "ZELIA is running (systemctl --user status zelia)."
+echo "Type to her any time with: zelia-say"
+echo
+if [ "$NEEDS_RELOGIN" = "1" ]; then
+    echo "NOTE: you were just added to the 'input' group (needed for ydotool)."
+    echo "Log out and back in for that to take effect."
+fi

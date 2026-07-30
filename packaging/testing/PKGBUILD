@@ -1,0 +1,50 @@
+# Maintainer: Zexolver
+# Testing/debug build -- always tracks the latest commit on main, versioned
+# automatically from `git describe` (standard Arch "-git" package
+# convention). For tagged stable releases, see packaging/stable/PKGBUILD.
+pkgname=zelia-git
+pkgver=0.0.0.r0.g0000000
+pkgrel=1
+pkgdesc="Local, voice-and-text-controlled personal AI agent -- no cloud, everything runs on your own machine (testing build, tracks main)"
+arch=('x86_64')
+url="https://github.com/Zexolver/Zelia"
+license=('custom')
+depends=(
+    'python'
+    'tesseract'
+    'tesseract-data-eng'
+    'xdotool'
+    'wmctrl'
+    'ydotool'
+    'portaudio'
+)
+optdepends=(
+    'vulkan-radeon: Ollama GPU acceleration on AMD (small brain + vision model)'
+)
+makedepends=('python-virtualenv' 'git')
+provides=('zelia')
+conflicts=('zelia')
+source=("zelia::git+https://github.com/Zexolver/Zelia.git#branch=main")
+sha256sums=('SKIP')
+install=../zelia.install
+
+pkgver() {
+    cd "$srcdir/zelia"
+    printf "r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "$srcdir/zelia"
+    python -m venv venv
+    venv/bin/pip install --upgrade pip wheel
+    venv/bin/pip install -r requirements.txt
+}
+
+package() {
+    cd "$srcdir/zelia"
+    install -dm755 "$pkgdir/opt/zelia"
+    cp -r src config systemd requirements.txt README.md venv "$pkgdir/opt/zelia/"
+    rm -f "$pkgdir/opt/zelia/config/config.yaml"  # per-user, written by zelia-setup
+    install -Dm755 packaging/zelia-setup "$pkgdir/usr/bin/zelia-setup"
+    install -Dm755 packaging/zelia-say "$pkgdir/usr/bin/zelia-say"
+}

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Type to ZELIA from anywhere. Thin wrapper around src/text_repl.py that
+# points it at this user's config (same one the systemd --user service
+# uses) rather than the read-only template that ships in the package.
+set -euo pipefail
+export ZELIA_CONFIG="${ZELIA_CONFIG:-$HOME/.zelia/config/config.yaml}"
+cd /opt/zelia
+exec venv/bin/python3 -m src.text_repl

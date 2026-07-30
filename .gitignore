@@ -8,3 +8,9 @@ __pycache__/
 /workspace/
 config/config.yaml
 !config/config.yaml.template
+
+# makepkg build artifacts (packaging/stable/, packaging/testing/)
+packaging/*/src/
+packaging/*/pkg/
+packaging/*/*.pkg.tar.*
+packaging/*/*.log
