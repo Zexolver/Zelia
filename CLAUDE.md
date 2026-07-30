@@ -417,6 +417,30 @@ first rather than assuming the existing code is still correct.
    processes (`SteamLinuxRuntime` et al.) match, not the client itself.
    Confirmed fixed: same idle-Steam machine state no longer reports
    "GAMING", and the queued job then ran immediately.
+15. ~~Screen reading was **completely non-functional on KDE Wayland**~~
+   (`grim: compositor doesn't support the screen capture protocol`) —
+   found testing the user's explicit request to have ZELIA read her
+   Steam library. `grim` needs the `wlr-screencopy` protocol, which only
+   wlroots compositors (Sway, Hyprland) implement -- it's simply absent
+   on KWin (KDE, this reference machine's actual desktop) and Mutter
+   (GNOME), not a "sometimes flaky" thing. `take_screenshot()` in
+   `screen_tool.py` now tries each Wayland candidate tool and actually
+   runs it (not just checks it's installed) rather than stopping at the
+   first one found: `grim`, then `spectacle -b -n -f -o <path>` (KDE's
+   own non-interactive screenshot tool, confirmed working). GNOME
+   Wayland still has no fallback wired up (would need
+   `gnome-screenshot`, untested, not added blind).
+16. ~~`tts.speak()` had no length cap~~ — a "read the text on my screen"
+   reply carried a multi-hundred-word OCR dump straight into `speak()`,
+   and Piper dutifully narrated the entire thing out loud, multiple
+   minutes of audio, during which the whole assistant was unresponsive
+   (`speak()` blocks on `sd.wait()`, which holds `main.py`'s
+   `activation_lock` for the whole duration). Added `MAX_SPOKEN_CHARS`
+   (600) truncation in `tts.py` -- the *text* channel still gets the
+   full reply regardless, this only bounds what gets narrated aloud.
+   Related to issue (2) below and to the user's separately-stated,
+   still-open priority: TTS reading raw content verbatim instead of
+   translating it into natural spoken language.
 
 Still open:
 
@@ -480,6 +504,65 @@ Still open:
    switch the configured small-brain model based on this evidence; no
    clear win over the current one, and swapping without a clear reason
    would just be churn.
+
+   **Concrete, worse case found later — multi-step GUI tasks, and (b)
+   above confirmed as a real, live-observed problem, not just a
+   hypothesis:** asked ZELIA (via `zelia-say`) to "open steam, go to my
+   library, and tell me what games I have installed." She called
+   `show_me` (correctly focused the Steam window), then answered "you
+   don't have any games installed" **without ever calling
+   `read_screen_text`/`describe_screen`/`click_at`** to actually look —
+   pure fabrication, confirmed by the tool-call log (only `show_me`
+   fired). Added an explicit system-prompt rule ("never answer a
+   question about specific on-screen content without actually looking
+   first... opening/focusing an app is not the same as having seen
+   what's inside it") and retried: it got *worse* — the retry called
+   *zero* tools and repeated the same wrong "no games installed" claim,
+   and `second_brain.recall()` confirms why: the first fabricated
+   answer was already stored and came back as "relevant context" for
+   the retry, reinforcing itself. This is (b) from the model-comparison
+   note above, now demonstrated rather than theorized. A third, simpler
+   probe ("look at the screen right now and describe what's open") also
+   fired zero tools, but its answer ("no application open, screen is
+   blank") turned out to be accidentally true — the KDE session had
+   locked itself (`loginctl ... LockedHint=yes`) during the extended
+   automated test run, since socket-driven requests don't count as user
+   input to the OS's own idle timer. Confirmed the underlying mechanism
+   itself works correctly when actually invoked (a plain "read the text
+   on my screen" request earlier in the same session did call
+   `read_screen_text` and returned real, correct OCR content) — the gap
+   is specifically the small model's inconsistent willingness to chain
+   multiple tool calls for a compound request rather than pattern-
+   matching straight to a plausible-sounding answer. Not resolved; the
+   `remember()`-stores-everything-indiscriminately design (see "Second
+   brain" above) makes this actively worse over time, not just
+   occasionally wrong, since a wrong answer becomes "precedent" for
+   later similar questions once it's in the memory store. Whoever picks
+   this up should treat the memory-quality-filtering idea in the Second
+   Brain section above as directly connected to this, not a separate
+   nice-to-have.
+
+   Also worth knowing for planning autonomous/overnight work
+   specifically: if the session locks (KDE's normal idle behavior, and
+   ZELIA's own automated activity doesn't prevent it), screen-reading
+   and GUI-interaction tools will all fail against a locked screen —
+   this doesn't block terminal/AirLLM-based coding work (no screen
+   visibility needed for that), but would block anything requiring
+   actually seeing/clicking a GUI app while the user is away/asleep. No
+   attempt made to address this (e.g. inhibiting the idle lock, or
+   detecting-and-reporting a locked session distinctly from "nothing on
+   screen") — flagging as something to decide on purpose, not backing
+   into a workaround unprompted.
+
+   **Verified working, separately from all of the above:** ZELIA's
+   `run_in_terminal` tool successfully launched a real, live Claude Code
+   CLI session (`claude --dangerously-skip-permissions`) in a visible
+   terminal on request — confirmed via the process list, not just her
+   claiming so. Deliberately did not feed that session any task/prompt
+   once it was up, since a fully permission-bypassed Claude Code
+   instance taking unsupervised action was not what was being tested
+   (just whether ZELIA could launch one at all) — it was left sitting
+   at its own interactive prompt.
 
 ## Pending features (not yet built)
 

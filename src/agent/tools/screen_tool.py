@@ -30,23 +30,42 @@ def _session_type() -> str:
 
 
 def take_screenshot() -> str:
-    """Returns a path to a freshly captured PNG screenshot."""
+    """Returns a path to a freshly captured PNG screenshot.
+
+    Tries each candidate tool in order and actually runs it rather than
+    stopping at the first one found installed -- grim needs the
+    wlr-screencopy protocol, which only wlroots compositors (Sway,
+    Hyprland) implement. It's simply *absent* on KWin (KDE) and Mutter
+    (GNOME) Wayland, where grim exists on disk (if installed at all) but
+    fails at runtime with "compositor doesn't support the screen capture
+    protocol" -- found by actually testing screen reading live on a KDE
+    Wayland session, not by reading the code. spectacle is KDE's own
+    non-interactive screenshot tool and works there instead."""
     path = tempfile.mktemp(prefix="zelia_screenshot_", suffix=".png")
     session = _session_type()
 
-    if session == "wayland" and _has("grim"):
-        subprocess.run(["grim", path], check=True)
-    elif _has("maim"):
-        subprocess.run(["maim", path], check=True)
-    elif _has("scrot"):
-        subprocess.run(["scrot", path], check=True)
-    elif _has("import"):  # ImageMagick fallback
-        subprocess.run(["import", "-window", "root", path], check=True)
+    if session == "wayland":
+        candidates = [["grim", path], ["spectacle", "-b", "-n", "-f", "-o", path]]
     else:
-        raise RuntimeError(
-            "No screenshot tool found. Install one of: maim, scrot, grim (Wayland), or imagemagick."
-        )
-    return path
+        candidates = [["maim", path], ["scrot", path], ["import", "-window", "root", path]]
+
+    errors = []
+    for cmd in candidates:
+        if not _has(cmd[0]):
+            continue
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=10)
+            if os.path.getsize(path) > 0:
+                return path
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            errors.append(f"{cmd[0]}: {exc}")
+
+    raise RuntimeError(
+        "No working screenshot tool for this session. Tried: "
+        + ("; ".join(errors) if errors else "nothing installed")
+        + ". On KDE Wayland, install spectacle; on GNOME Wayland, gnome-screenshot "
+          "isn't wired up here yet -- see CLAUDE.md."
+    )
 
 
 def _has(binary: str) -> bool:
