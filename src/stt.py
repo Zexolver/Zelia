@@ -62,12 +62,14 @@ class SpeechToText:
         audio = np.concatenate(frames, axis=0).flatten().astype(np.float32) / 32768.0
         return audio
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, redact: bool = False) -> str:
         segments, _info = self.model.transcribe(audio, language="en", beam_size=1)
         text = " ".join(seg.text.strip() for seg in segments).strip()
-        log.info("Heard: %r", text)
+        # redact=True for anything sensitive (e.g. a spoken password) -- never
+        # let it hit the journal in plaintext.
+        log.info("Heard: %r", text if not redact else "[redacted]")
         return text
 
-    def listen_and_transcribe(self) -> str:
+    def listen_and_transcribe(self, redact: bool = False) -> str:
         audio = self.record_utterance()
-        return self.transcribe(audio)
+        return self.transcribe(audio, redact=redact)

@@ -36,6 +36,19 @@ def build_confirmation_asker(stt: SpeechToText, tts: TextToSpeech):
     return ask_confirmation
 
 
+def build_password_asker(stt: SpeechToText, tts: TextToSpeech):
+    """ZELIA never stores a password -- this asks for one live, right when a
+    locked screen is actually in her way, the same gate the lock screen
+    itself already is. Voice only: redact=True on the STT call keeps it out
+    of the journal, and this never goes through second_brain.remember() or
+    the normal request pipeline (it's a direct side-channel call, same
+    pattern as build_confirmation_asker above)."""
+    def ask_for_password(question: str) -> str:
+        tts.speak(question)
+        return stt.listen_and_transcribe(redact=True)
+    return ask_for_password
+
+
 def start_priority_manager(game_guard: GameGuard, normal_nice: int, gaming_nice: int, poll_seconds: float = 5.0):
     """Lowers ZELIA's own process priority while a game is running, restores it after."""
     try:
@@ -109,6 +122,7 @@ def main():
         ollama_host=cfg.brains.small.host,
         default_browser=cfg.desktop.get("default_browser", "floorp"),
         config_path=os.environ.get("ZELIA_CONFIG", f"{cfg.install_dir}/config/config.yaml"),
+        ask_for_password=build_password_asker(stt, tts),
     )
 
     activation_lock = threading.Lock()

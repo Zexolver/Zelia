@@ -244,22 +244,50 @@ TOOL_SCHEMAS = [
 MAX_TOOL_ROUNDS = 10
 
 
+SCREEN_VISIBILITY_TOOLS = {"read_screen_text", "describe_screen", "find_text_on_screen", "click_at"}
+
+
 class AgentLoop:
     def __init__(self, small_brain, large_brain, second_brain, workspace_dir: str, ask_confirmation,
                  vision_model: str = "moondream", ollama_host: str = "http://127.0.0.1:11434",
-                 default_browser: str = "floorp", config_path: str = ""):
+                 default_browser: str = "floorp", config_path: str = "", ask_for_password=None):
         self.small_brain = small_brain
         self.large_brain = large_brain
         self.second_brain = second_brain
         self.files = FileTool(workspace_dir)
         self.code = CodeTool(workspace_dir)
         self.ask_confirmation = ask_confirmation  # fn(question: str) -> bool, spoken yes/no
+        self.ask_for_password = ask_for_password  # fn(question: str) -> str, spoken, never logged; None if unsupported (e.g. text-only session)
         self.vision_model = vision_model
         self.ollama_host = ollama_host
         self.default_browser = default_browser
         self.config_path = config_path
 
+    def _ensure_unlocked_for_screen_access(self) -> dict | None:
+        """Called before any tool that needs the real screen visible (not a
+        locked/blank frame). Returns None if the screen's already unlocked
+        (or lock state can't be determined) -- proceed as normal. Returns an
+        error dict if it's locked and couldn't be unlocked, in which case the
+        caller should use that as the tool result instead of running the
+        real tool against a blank/locked screen."""
+        desktop_control.inhibit_idle_briefly()
+        if not desktop_control.is_screen_locked():
+            return None
+        if self.ask_for_password is None:
+            return {"ok": False, "error": "Screen is locked and no way to ask for the password is available right now (text-only session)."}
+        password = self.ask_for_password("The screen is locked -- what's the password?")
+        if not password:
+            return {"ok": False, "error": "Screen is locked and no password was given."}
+        result = desktop_control.unlock_screen_with_password(password)
+        if not result.get("ok"):
+            return {"ok": False, "error": "Screen is locked and the unlock attempt failed."}
+        return None
+
     def _dispatch_tool(self, name: str, args: dict) -> dict:
+        if name in SCREEN_VISIBILITY_TOOLS:
+            lock_error = self._ensure_unlocked_for_screen_access()
+            if lock_error is not None:
+                return lock_error
         if name == "run_in_terminal":
             command = args.get("command", "")
             if is_destructive(command) and not args.get("confirmed"):

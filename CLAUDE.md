@@ -215,6 +215,66 @@ actively working in.
   (`pywayland`/`wlr-layer-shell`) to do properly, which is a bigger lift
   than was justified this pass.
 
+**Screen lock** (`desktop_control.is_screen_locked`,
+`unlock_screen_with_password`, `inhibit_idle_briefly`,
+`agent_loop._ensure_unlocked_for_screen_access`, `main.build_password_asker`):
+explicit user requirement, arrived at deliberately after weighing the
+security tradeoff out loud with the user rather than building it blind —
+worth reading this in full before touching any of it.
+
+- **What was explicitly rejected**: ZELIA storing a password anywhere, or
+  any mechanism that unlocks the screen without a real, live password
+  actually being supplied by whoever's talking to her *at that moment*.
+  Two attempts to even investigate a stored-credential approach (accepting
+  a Claude Code trust prompt as a side effect of testing, and just
+  checking whether `secret-tool` was installed) were independently blocked
+  by Claude Code's own safety classifier — treated as a signal that this
+  class of capability needs a human decision, not an agent one, and
+  intentionally not routed around.
+- **What was built instead**: ZELIA never stores a credential. When a
+  tool that needs the actual screen visible (`read_screen_text`,
+  `describe_screen`, `find_text_on_screen`, `click_at`) is about to run
+  and the screen is locked, `agent_loop._ensure_unlocked_for_screen_access`
+  calls `ask_for_password` (`main.build_password_asker`, voice-only): TTS
+  asks out loud, STT listens for the answer with `redact=True` (see
+  `stt.py` — logs `[redacted]` instead of the transcript, specifically so
+  a spoken password never lands in the journal). The answer never goes
+  through `second_brain.remember()` or the normal request pipeline at all
+  — this is a direct side-channel call, the same pattern
+  `build_confirmation_asker` already used for yes/no destructive-command
+  confirmation. `unlock_screen_with_password` then types it via the
+  existing `type_text`/`press_key` (which already don't log their
+  arguments) and submits with Enter. Functionally this is the same
+  security gate the lock screen itself already is — ZELIA is just relaying
+  a real-time answer, not bypassing anything — so it doesn't introduce a
+  new way to unlock the machine beyond "know the actual password," it
+  just lets her ask for it and type it instead of a human doing so
+  directly. No exposed tool for this in `TOOL_SCHEMAS` — it's automatic,
+  underneath the small model's own tool-calling decisions, precisely
+  because that's an already-demonstrated weak point (see Known Issues) and
+  this isn't something that should depend on it deciding correctly.
+- Text-only sessions can't use this (`ask_for_password` is voice-only;
+  `_ensure_unlocked_for_screen_access` returns a clear error instead of
+  hanging if `ask_for_password` is unavailable) — asking for a password
+  via the text socket and having it echo back over that channel felt like
+  a worse tradeoff than just not supporting it there yet.
+- Separately, `inhibit_idle_briefly()` (via `systemd-inhibit --what=idle`,
+  universal across desktop environments, no KDE/GNOME-specific API)
+  fire-and-forget blocks the idle timer for ~90s any time a screen/GUI
+  tool runs, so the screen doesn't lock itself *while she's actively using
+  it* in the first place. This doesn't touch an already-locked screen
+  (e.g. the user deliberately locking it) — that's what the
+  password-prompt path above is for.
+- Verified live: asked ZELIA to read the screen while genuinely locked
+  (the session had auto-locked from being idle during automated testing).
+  She correctly detected the lock, asked for the password out loud,
+  and — since no real answer was given in that test — failed gracefully
+  with a clear error rather than guessing or retrying silently. The
+  journal confirmed `Heard: '[redacted]'`, not the actual transcript.
+  Actually typing a real password to confirm the full unlock hasn't been
+  tested (deliberately -- that needs the real user's live voice, not
+  something to simulate).
+
 **Install, from source** (`install.sh`): prompts for install directory
 (supports pointing at a dedicated drive), auto-detects GPU vendor, installs
 system packages + Ollama + Vulkan drivers (if AMD) + ydotool + a

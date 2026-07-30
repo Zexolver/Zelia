@@ -215,6 +215,7 @@ def preserve_focus_if_user_active(action):
     from src import idle_detect
     from src.agent.tools import window_highlight
 
+    inhibit_idle_briefly()
     previous = _get_active_window_id()
     user_was_active = idle_detect.is_user_active()
     result = action()
@@ -228,3 +229,58 @@ def preserve_focus_if_user_active(action):
         subprocess.run(["xdotool", "windowactivate", previous], capture_output=True)
         log.info("Restored focus to previous window (user was active)")
     return result
+
+
+def inhibit_idle_briefly(seconds: int = 90, why: str = "ZELIA is actively using the screen") -> None:
+    """Fire-and-forget: blocks the idle timer (which would otherwise lock
+    the screen or sleep the machine) for `seconds`, via systemd-logind --
+    universal across desktop environments, no KDE/GNOME-specific API
+    needed. Harmless to call repeatedly/overlapping (each call is its own
+    short-lived inhibitor; logind just honors whichever are still active).
+    Doesn't affect an *already*-locked screen -- pair with
+    is_screen_locked()/unlock_screen_with_password() for that."""
+    try:
+        subprocess.Popen(
+            ["systemd-inhibit", "--what=idle", "--who=ZELIA", f"--why={why}", "--mode=block", "sleep", str(seconds)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        log.warning("Could not inhibit idle lock: %s", exc)
+
+
+# --------------------------------------------------------------------------
+# Screen lock -- ZELIA never stores a password. Screen-reading tools that
+# need the actual desktop visible (not a blank/locked frame) ask for the
+# password live, right when it's needed, via ask_for_password (voice-only,
+# see main.py) -- functionally the same gate the lock screen itself already
+# is, just relayed through her rather than typed directly. See CLAUDE.md's
+# "Screen lock" section for the full reasoning and what was deliberately
+# NOT built (no stored credential, no bypass without live user input).
+# --------------------------------------------------------------------------
+def is_screen_locked() -> bool:
+    try:
+        import getpass
+        user = getpass.getuser()
+        sessions = subprocess.check_output(["loginctl", "list-sessions", "--no-legend"], text=True)
+        for line in sessions.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == user:
+                locked = subprocess.check_output(
+                    ["loginctl", "show-session", parts[0], "-p", "LockedHint", "--value"], text=True
+                ).strip()
+                if locked == "yes":
+                    return True
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False  # can't tell -- don't block on a guess
+
+
+def unlock_screen_with_password(password: str) -> dict:
+    """Types `password` wherever it's needed (the lock screen, if locked)
+    and submits it. Never logs or returns the password itself -- type_text/
+    press_key don't log their arguments, and this doesn't echo them either."""
+    result = type_text(password)
+    if not result.get("ok"):
+        return {"ok": False, "error": "Could not type the password."}
+    time.sleep(0.2)
+    return press_key("enter")
