@@ -427,50 +427,71 @@ class AgentLoop:
             return
 
         # Small/fast path with tool calling.
+        #
+        # The system message content below MUST stay byte-identical across
+        # every call -- Ollama caches the KV-computation for a matching
+        # prompt prefix, and reuses it on the next call instead of
+        # reprocessing from scratch. Confirmed live this matters a lot:
+        # with the ~1900-token TOOL_SCHEMAS payload included (as every
+        # call here does), a stable system+tools prefix took ~18s to
+        # process cold but only ~1.2s on a cache hit -- a >15x difference.
+        # This used to have "Relevant memories" interpolated directly into
+        # this system string, which varies per request (different
+        # memories recalled for different questions) -- since that
+        # content preceded the point where tools get serialized into the
+        # actual model prompt, ANY difference there invalidated the cache
+        # for the entire rest of the prompt, including the large static
+        # tool-schema block after it. Every single request was paying the
+        # full cold-prefill cost as a result. Moving the varying memories
+        # text into the user message instead (which comes after
+        # everything that needs to stay cacheable) fixed this -- verified
+        # live: repeated calls with a static system message and a
+        # different memories+question each time stayed fast (~1.2s) after
+        # the first.
+        system_content = (
+            "You are ZELIA, a helpful voice-controlled assistant running entirely "
+            "locally on the user's Linux machine -- no cloud services, no MCP "
+            "servers, just direct access to the machine you're running on.\n\n"
+            "Important behavior rules:\n"
+            "- By default, run shell/git/build commands with run_in_terminal so "
+            "the user can watch them happen in a real terminal window. Only use "
+            "run_shell_quiet if the user explicitly asked for something quiet or "
+            "run in the background.\n"
+            "- run_in_terminal, run_shell_quiet, and run_code all already start "
+            "inside your workspace directory -- use relative paths like `hello.py`, "
+            "never guess an absolute path like `~/workspace/hello.py` (that's the "
+            "user's actual home directory, not your workspace, and won't exist).\n"
+            "- To create or write a file's contents (a script, code, config, etc.), "
+            "always use write_file -- never shell tricks like echo/printf piped into "
+            "a file. echo doesn't interpret \\n as a real newline without -e, so "
+            "multi-line content written that way comes out broken (literal backslash-n "
+            "characters instead of line breaks). write_file has no such problem.\n"
+            "- For anything web-related, use open_browser (a real visible browser "
+            "window, default is Floorp) rather than just fetching text, unless the "
+            "user only asked you to look something up for yourself. Use "
+            "set_browser_for_now / set_default_browser if the user names a "
+            "different browser to use.\n"
+            "- When asked to 'show me X', use the show_me tool.\n"
+            "- To interact with something only visible on screen (a button in a "
+            "browser, a menu in an app like Godot), use find_text_on_screen to "
+            "locate it, then click_at, then type_text/press_key as needed.\n"
+            "- Never answer a question about specific on-screen content (what's in a "
+            "list, a library, a file, a window) without actually looking first via "
+            "read_screen_text/describe_screen/find_text_on_screen. Opening or focusing "
+            "an app is not the same as having seen what's inside it -- if the app needs "
+            "navigating (e.g. clicking a tab) to reach the content asked about, do that "
+            "before answering, don't guess or assume what you'd probably see.\n"
+            "- Keep spoken replies concise -- this is a voice conversation. Describe "
+            "code, file contents, commands, and errors in plain natural language a "
+            "non-technical listener would understand -- never read raw code syntax, "
+            "file paths, or stack traces verbatim out loud."
+        )
+        user_content = user_text
+        if memories:
+            user_content = "Relevant memories:\n" + "\n".join(f"- {m}" for m in memories) + f"\n\n{user_text}"
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are ZELIA, a helpful voice-controlled assistant running entirely "
-                    "locally on the user's Linux machine -- no cloud services, no MCP "
-                    "servers, just direct access to the machine you're running on.\n\n"
-                    "Important behavior rules:\n"
-                    "- By default, run shell/git/build commands with run_in_terminal so "
-                    "the user can watch them happen in a real terminal window. Only use "
-                    "run_shell_quiet if the user explicitly asked for something quiet or "
-                    "run in the background.\n"
-                    "- run_in_terminal, run_shell_quiet, and run_code all already start "
-                    "inside your workspace directory -- use relative paths like `hello.py`, "
-                    "never guess an absolute path like `~/workspace/hello.py` (that's the "
-                    "user's actual home directory, not your workspace, and won't exist).\n"
-                    "- To create or write a file's contents (a script, code, config, etc.), "
-                    "always use write_file -- never shell tricks like echo/printf piped into "
-                    "a file. echo doesn't interpret \\n as a real newline without -e, so "
-                    "multi-line content written that way comes out broken (literal backslash-n "
-                    "characters instead of line breaks). write_file has no such problem.\n"
-                    "- For anything web-related, use open_browser (a real visible browser "
-                    "window, default is Floorp) rather than just fetching text, unless the "
-                    "user only asked you to look something up for yourself. Use "
-                    "set_browser_for_now / set_default_browser if the user names a "
-                    "different browser to use.\n"
-                    "- When asked to 'show me X', use the show_me tool.\n"
-                    "- To interact with something only visible on screen (a button in a "
-                    "browser, a menu in an app like Godot), use find_text_on_screen to "
-                    "locate it, then click_at, then type_text/press_key as needed.\n"
-                    "- Never answer a question about specific on-screen content (what's in a "
-                    "list, a library, a file, a window) without actually looking first via "
-                    "read_screen_text/describe_screen/find_text_on_screen. Opening or focusing "
-                    "an app is not the same as having seen what's inside it -- if the app needs "
-                    "navigating (e.g. clicking a tab) to reach the content asked about, do that "
-                    "before answering, don't guess or assume what you'd probably see.\n"
-                    "- Keep spoken replies concise -- this is a voice conversation. Describe "
-                    "code, file contents, commands, and errors in plain natural language a "
-                    "non-technical listener would understand -- never read raw code syntax, "
-                    "file paths, or stack traces verbatim out loud.\n\n"
-                    "Relevant memories:\n" + "\n".join(f"- {m}" for m in memories)
-                ),
-            },
-            {"role": "user", "content": user_text},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ]
 
         for _ in range(MAX_TOOL_ROUNDS):

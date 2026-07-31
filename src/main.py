@@ -171,7 +171,28 @@ def main():
         try:
             def respond(msg: str) -> None:
                 send_line(msg)
-                safe_speak(msg)
+                # Speak in the background instead of blocking here --
+                # send_line() writes to the socket, but the connection
+                # itself doesn't actually close (and text_input.py's
+                # handle_conn returns) until this whole function does.
+                # safe_speak() used to run synchronously, so every text
+                # client -- including remote_bridge.py's relay, and by
+                # extension the mobile app -- had to wait for local audio
+                # playback to finish (sd.wait() in tts.py) before getting
+                # a reply, even though a phone user never hears that
+                # audio at all. Confirmed live this was adding real,
+                # unnecessary seconds to every reply. Trade-off: the
+                # activation lock (see finally: below) now releases
+                # before speech finishes, so a near-simultaneous wake-word
+                # activation could in principle start while this reply is
+                # still being spoken aloud locally -- accepted as a
+                # narrow edge case given how much this matters for
+                # remote/text responsiveness. Voice-originated requests
+                # (on_wake below) are untouched -- blocking through TTS
+                # there is the actually-correct behavior, since the user
+                # is standing right there and a new wake word shouldn't
+                # talk over the current answer.
+                threading.Thread(target=safe_speak, args=(msg,), daemon=True).start()
 
             agent.handle_request(user_text, speak=respond, remember_and_reply_when_done=respond)
         finally:
