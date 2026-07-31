@@ -1,14 +1,20 @@
 """
 HTTP bridge so a phone (or anything else reachable over Tailscale) can chat
-with ZELIA the same way text_repl.py/text_gui.py already do -- this module
-is deliberately just another *client* of the existing zelia.sock protocol,
-not a new entry point into the agent. Every request opens a fresh
-connection to zelia.sock, sends the message, and relays back whatever
-line(s) come back before the connection closes -- identical semantics to
-every other text client this project already has (see text_input.py's
-docstring: for a request that routes to the large brain, that's just the
-"working on it" acknowledgement; the eventual answer is spoken aloud, not
-delivered over a connection that's most likely already closed by then).
+with ZELIA the same way text_repl.py/text_gui.py already do -- for the
+chat endpoint, this module is deliberately just another *client* of the
+existing zelia.sock protocol, not a new entry point into the agent. Every
+/chat request opens a fresh connection to zelia.sock, sends the message,
+and relays back whatever line(s) come back before the connection closes --
+identical semantics to every other text client this project already has
+(see text_input.py's docstring: for a request that routes to the large
+brain, that's just the "working on it" acknowledgement; the eventual
+answer is spoken aloud, not delivered over a connection that's most
+likely already closed by then).
+
+GET /memories is a read-only exception to the "just a socket client"
+design above -- it needs direct access to a SecondBrain instance (passed
+into start() optionally) since browsing/listing stored memories isn't
+something the zelia.sock chat protocol has a way to ask for.
 
 Bound to all interfaces (0.0.0.0) rather than specifically the tailscale0
 interface, for simplicity and because the machine's normal LAN is already
@@ -50,7 +56,7 @@ def _relay(socket_path: str, message: str) -> list[str]:
     return lines
 
 
-def _make_handler(socket_path: str, token: str):
+def _make_handler(socket_path: str, token: str, second_brain):
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # noqa: A002 -- quiet; ZELIA's own logger covers what matters below
             pass
@@ -65,6 +71,14 @@ def _make_handler(socket_path: str, token: str):
                 return True  # no token configured -- treat as intentionally open (Tailscale-only network is the gate)
             return self.headers.get("Authorization", "") == f"Bearer {token}"
 
+        def _json(self, payload: dict, code: int = 200) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             if self.path == "/health":
                 payload = b"ok"
@@ -72,8 +86,20 @@ def _make_handler(socket_path: str, token: str):
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
-            else:
-                self._reject(404)
+                return
+
+            if self.path.startswith("/memories"):
+                if not self._authorized():
+                    self._reject(401)
+                    return
+                if second_brain is None:
+                    self._reject(404)
+                    return
+                memories = second_brain.list_recent()
+                self._json({"memories": memories})
+                return
+
+            self._reject(404)
 
         def do_POST(self):
             if self.path != "/chat":
@@ -102,17 +128,12 @@ def _make_handler(socket_path: str, token: str):
                 self._reject(503)
                 return
 
-            payload = json.dumps({"reply": "\n".join(lines)}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            self._json({"reply": "\n".join(lines)})
 
     return Handler
 
 
-def start(socket_path: str, port: int, token: str) -> None:
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), _make_handler(socket_path, token))
+def start(socket_path: str, port: int, token: str, second_brain=None) -> None:
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), _make_handler(socket_path, token, second_brain))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    log.info("Remote bridge listening on 0.0.0.0:%d (POST /chat, GET /health)", port)
+    log.info("Remote bridge listening on 0.0.0.0:%d (POST /chat, GET /health, GET /memories)", port)

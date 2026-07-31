@@ -11,9 +11,18 @@ documentation), pair this with fetch_url in browser_tool.py -- that's a
 plain HTTP request, not a hidden GUI action, so it doesn't conflict with
 "nothing invisible" the way a background terminal command would.
 
-For interacting with a page after it's open (typing into a search/chat box,
-clicking something only visible on screen), use desktop_control's
-type_text/press_key/click_at/find_text_on_screen.
+For reading/scrolling a specific already-open Brave tab's actual content
+(a long chat conversation, an article), see cdp_reader.py -- it talks to
+Brave's remote-debugging protocol directly, no synthetic input at all.
+That needs Brave to have been launched with --remote-debugging-port, which
+open_browser() below always includes for Brave specifically now (harmless
+if Brave was already running from before this -- Chromium apps are
+single-instance, so a flag on a later launch only takes effect if Brave
+wasn't already running; see cdp_reader.py for what happens if it wasn't).
+
+For interacting with a page after it's open by typing/clicking (search
+boxes, buttons), use desktop_control's type_text/press_key/click_at/
+find_text_on_screen.
 """
 import shutil
 import subprocess
@@ -32,6 +41,10 @@ KNOWN_BINARIES = {
     "chrome": ["google-chrome-stable", "google-chrome"],
     "brave": ["brave", "brave-browser"],
 }
+
+# See cdp_reader.py -- must match its CDP_PORT constant.
+BRAVE_CDP_PORT = 9222
+BRAVE_FLATPAK_ID = "com.brave.Browser"
 
 # In-memory override for "use X browser for this" / "for now" -- doesn't
 # touch config.yaml, just this running session. Reset on restart.
@@ -69,7 +82,26 @@ def open_browser(url: str, browser: str | None = None, default_browser: str = "f
     if not (url.startswith("http://") or url.startswith("https://")):
         url = f"https://{url}"
 
-    if mode == "binary":
+    if mode == "desktop" and ident == BRAVE_FLATPAK_ID:
+        # `flatpak run` (not gtk-launch) so the debug-port flag actually
+        # reaches Brave's own argv -- gtk-launch just substitutes the URL
+        # into the .desktop file's fixed Exec line, no room for extra
+        # flags. Only takes effect if Brave wasn't already running
+        # (Chromium apps are single-instance; a later launch just opens a
+        # tab in whatever session is already up) -- see cdp_reader.py for
+        # how that's detected and surfaced.
+        subprocess.Popen([
+            "flatpak", "run", BRAVE_FLATPAK_ID,
+            f"--remote-debugging-port={BRAVE_CDP_PORT}",
+            # Chromium rejects CDP WebSocket connections whose Origin header
+            # doesn't match an explicit allowlist by default (an anti-DNS-
+            # rebinding protection) -- confirmed live: without this,
+            # cdp_reader.py's connection got a 403 even with the port open
+            # and reachable over plain HTTP.
+            f"--remote-allow-origins=http://127.0.0.1:{BRAVE_CDP_PORT}",
+            url,
+        ])
+    elif mode == "binary":
         subprocess.Popen([ident, url])
     else:
         subprocess.Popen(["gtk-launch", ident, url])

@@ -10,7 +10,7 @@ from src.agent.tools.shell_tool import run_shell, is_destructive
 from src.agent.tools.file_tool import FileTool
 from src.agent.tools.browser_tool import fetch_url
 from src.agent.tools.code_tool import CodeTool
-from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool, browser_tabs
+from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool, browser_tabs, page_reader, cdp_reader
 from src.router import classify
 from src.utils.logger import get_logger
 
@@ -121,6 +121,37 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {"browser": {"type": "string", "description": "Which browser's window to focus first, e.g. 'brave' or 'floorp'."}},
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_full_page",
+            "description": "Reads an ENTIRE long page or conversation by scrolling down through it (Page Down) and reading each screen's worth of text, stopping automatically once scrolling no longer reveals new content. Use this whenever asked to read/summarize/describe the FULL content of something that could extend beyond one screen -- a chat conversation (Gemini, Claude.ai), a long article, a scrollable document. read_screen_text only sees whatever's currently visible; for anything that might be longer than one screen, use this instead or you'll only see -- and summarize -- the first screenful. Pass 'browser' so it can focus the right window itself first. NOTE: for a tab open in Brave specifically, prefer read_brave_tab instead -- it's more accurate (reads the page's real content directly, not a screenshot guess) and doesn't need to move the mouse/keyboard at all.",
+            "parameters": {
+                "type": "object",
+                "properties": {"browser": {"type": "string", "description": "Which browser's window to focus first, e.g. 'brave' or 'floorp'."}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_brave_tab",
+            "description": "Reads a Brave tab's ENTIRE real content directly (not a screenshot/OCR guess, and not limited to what's currently scrolled into view) by talking to Brave's own remote-debugging protocol. Use this instead of read_full_page/read_screen_text whenever the tab you need to read is open in Brave specifically (Gemini chats, Claude.ai chats, articles, anything) -- it's more accurate and doesn't need to move the mouse/keyboard at all. Only works if Brave was launched with remote debugging enabled (open_browser does this automatically for Brave now) -- if it wasn't (e.g. Brave was already running from before), this will fail with a clear error explaining that Brave needs a full restart; fall back to read_full_page for that one request rather than guessing.",
+            "parameters": {
+                "type": "object",
+                "properties": {"hint": {"type": "string", "description": "Text to match against the tab's title or URL, e.g. 'gemini', 'claude.ai'."}},
+                "required": ["hint"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_brave_tabs",
+            "description": "Lists titles/URLs of every tab currently open in Brave, via its remote-debugging protocol -- lighter-weight than read_brave_tab/read_all_browser_tabs since it doesn't read each tab's full content, just what's open. Use for 'what tabs do I have open' when Brave is the browser in question.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -290,7 +321,10 @@ def _find_leaked_tool_calls(content: str) -> list[tuple[str, dict]]:
     return found
 
 
-SCREEN_VISIBILITY_TOOLS = {"read_screen_text", "describe_screen", "find_text_on_screen", "click_at", "read_all_browser_tabs"}
+SCREEN_VISIBILITY_TOOLS = {
+    "read_screen_text", "describe_screen", "find_text_on_screen", "click_at",
+    "read_all_browser_tabs", "read_full_page", "read_brave_tab", "list_brave_tabs",
+}
 
 
 class AgentLoop:
@@ -359,6 +393,12 @@ class AgentLoop:
             result = screen_tool.read_screen_text()
         elif name == "read_all_browser_tabs":
             result = browser_tabs.read_all_tabs(browser=args.get("browser", ""))
+        elif name == "read_full_page":
+            result = page_reader.read_full_page(browser=args.get("browser", ""))
+        elif name == "read_brave_tab":
+            result = cdp_reader.read_tab(args.get("hint", ""))
+        elif name == "list_brave_tabs":
+            result = cdp_reader.list_tab_titles()
         elif name == "describe_screen":
             result = screen_tool.describe_screen(args.get("question", ""), self.vision_model, self.ollama_host)
         elif name == "show_me":
@@ -481,6 +521,14 @@ class AgentLoop:
             "an app is not the same as having seen what's inside it -- if the app needs "
             "navigating (e.g. clicking a tab) to reach the content asked about, do that "
             "before answering, don't guess or assume what you'd probably see.\n"
+            "- read_screen_text/describe_screen only see whatever is currently visible "
+            "on screen -- if asked to read/summarize/describe the FULL content of "
+            "something that could be longer than one screen (a chat conversation, a "
+            "long article, a scrollable document), use read_full_page instead, or "
+            "you'll only see and summarize the first screenful and miss the rest. If "
+            "the tab in question is open in Brave specifically, use read_brave_tab "
+            "instead of read_full_page -- it reads the page's actual content directly "
+            "(more accurate, and doesn't need to move the mouse/keyboard at all).\n"
             "- Keep spoken replies concise -- this is a voice conversation. Describe "
             "code, file contents, commands, and errors in plain natural language a "
             "non-technical listener would understand -- never read raw code syntax, "

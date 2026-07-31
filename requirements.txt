@@ -21,6 +21,10 @@ pillow
 pytesseract
 pygobject   # AT-SPI accessibility-tree access (atspi_tool.py) -- needs at-spi2-core installed system-wide too
 
+# Browser reading (cdp_reader.py) -- talks to Brave's remote-debugging
+# protocol directly instead of OCR+synthetic scrolling
+websocket-client
+
 # Second brain (long-term memory)
 chromadb
 onnxruntime   # backs chromadb's DefaultEmbeddingFunction (ONNX MiniLM-L6-v2) -- see src/memory/second_brain.py

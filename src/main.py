@@ -207,6 +207,7 @@ def main():
             socket_path(cfg.install_dir),
             remote_cfg.get("port", 8765),
             remote_cfg.get("token", ""),
+            second_brain=second_brain,
         )
 
     try:

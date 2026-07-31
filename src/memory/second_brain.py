@@ -117,3 +117,20 @@ class SecondBrain:
 
     def stats(self) -> dict:
         return {"total_memories": self.collection.count(), "pending_writes": self._write_queue.qsize()}
+
+    def list_recent(self, limit: int = 100) -> list[dict]:
+        """Most-recent-first listing for browsing/viewing the second brain
+        (not a recall/search) -- e.g. the mobile app's memory viewer.
+        chromadb's get() has no server-side ordering, so this fetches
+        everything and sorts by the timestamp remember() always stores,
+        then slices. Fine at this project's current memory-count scale;
+        would need real pagination if the collection grows very large."""
+        if self.collection.count() == 0:
+            return []
+        result = self.collection.get(include=["documents", "metadatas"])
+        items = [
+            {"id": id_, "text": doc, "role": meta.get("role", "unknown"), "timestamp": meta.get("timestamp", 0)}
+            for id_, doc, meta in zip(result["ids"], result["documents"], result["metadatas"])
+        ]
+        items.sort(key=lambda m: m["timestamp"], reverse=True)
+        return items[:limit]
