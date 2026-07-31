@@ -1009,6 +1009,129 @@ first rather than assuming the existing code is still correct.
    column first (should say "Forever"), then whether anything
    reintroduced per-request-varying content into the system message
    ahead of the tool schemas.
+23. ~~Asked to read/summarize a long Gemini/Claude.ai chat, ZELIA could
+   only Ctrl+Tab between tabs, not scroll within one to see past the
+   first screenful~~ — user-reported bug. `page_reader.py`'s
+   `read_full_page` fixes this: scrolls down (Page Down) through the
+   current tab, reading each screen via `read_screen_text`, until
+   scrolling stops changing what's visible (same cycle-detection
+   principle as `browser_tabs.py`'s tab-cycling, applied within a page
+   instead of between tabs). Confirmed live against a real, genuinely
+   long Gemini response (30 requested haikus): read 4 screens before
+   correctly detecting the end. Found and fixed a real performance issue
+   along the way: `take_screenshot()` was capturing the *entire* virtual
+   desktop (all 3 monitors, 4280x1920) via spectacle's `-f` flag for
+   every read, even though `read_screen_text`/`describe_screen`/
+   `click_at` only ever care about the focused window — switched to `-a`
+   (active window only), confirmed ~2.5x faster (~4.7s → ~1.9s per call).
+24. **Started a major architecture shift: ZELIA's mouse/keyboard input
+   is being moved off the user's real devices entirely.** Explicit user
+   requirement, arrived at through a long back-and-forth (see the
+   session transcript around this if the summary below isn't enough
+   context): she needs to be able to do things — click, type, scroll —
+   while the user is actively gaming/using Blender/etc. with their own
+   physical mouse and keyboard, without any interference. `ydotool`
+   (the entire input story until this point) fundamentally can't do
+   this: its virtual device shares the ONE system cursor and keyboard
+   focus with the user's real hardware (confirmed via `python-evdev`:
+   only `EV_KEY`/`EV_REL` capabilities, and more fundamentally, Wayland's
+   `wl_seat` model is single-pointer/single-keyboard-focus at the
+   protocol level — there is no compositor-agnostic way around that).
+   - **Researched and ruled out:** writing a custom Wayland
+     compositor/KWin extension for a second visible cursor. Not a scoped
+     side-project — Wayland's core protocol model only allows one
+     pointer/keyboard focus per seat, so this would mean rearchitecting
+     the compositor's input-redirection pipeline at a fundamental level
+     (and even then, most apps' own UI code assumes single-pointer
+     semantics). No production Wayland compositor supports this today;
+     it's a genuine, industry-wide platform gap, not a KWin-specific one.
+   - **Found the real answer:** `ext-transient-seat-v1`, a Wayland
+     protocol specifically for this (remote-desktop tools needing an
+     isolated seat instead of merging with the local one). Per
+     wayland.app's compositor compatibility matrix, this is implemented
+     server-side by KWin (6.6+, so this project's actual KWin 6.7.3
+     already has it), Mutter (49.2+), wlroots (0.18+, e.g. Sway,
+     Hyprland), and others — genuinely not KDE-specific. It's gated to
+     "privileged clients" though (confirmed: a plain `wayland-info`
+     client sees no `ext_transient_seat_manager_v1` global at all), and
+     the actual, standard way to become one is
+     `org.freedesktop.portal.RemoteDesktop` — a normal XDG Desktop
+     Portal D-Bus interface (`CreateSession`/`SelectDevices`/`Start`,
+     then `NotifyKeyboardKeysym`/`NotifyPointerMotion`/etc.), which is
+     almost certainly what's been showing that "Remote Control ... is
+     asking for special privileges: Control input devices" consent
+     dialog every time `xdotool`/`ydotool` ran this whole session.
+   - **Architecture:** `input_backend_ydotool.py` (the old approach, now
+     archived, opt-in via `config.yaml`'s new `desktop.input_backend:
+     "ydotool"`) and `input_backend_portal.py` (new default, `"portal"`)
+     sit behind a dispatcher in `desktop_control.py` — every other
+     module's call site (`desktop_control.press_key()` etc.) is
+     unchanged. Deliberately **not KDE-specific** in the new backend:
+     only standard portal D-Bus calls, nothing KWin-scripting-based, so
+     whichever compositor + portal backend combination implements the
+     protocol is what actually provides the isolation.
+   - **Confirmed live:** typed text into a focused window (Kate) via
+     `NotifyKeyboardKeysym` through an isolated portal session, while
+     the real keyboard was left alone — and it correctly followed the
+     compositor's existing focus state (`focus_window()` didn't need any
+     changes). One-time consent dialog per process lifetime, same
+     principle as every other permission prompt in this project — not
+     something to script around; explicitly declined to auto-click it
+     even after confirming it was technically possible to try, same
+     reasoning as the earlier declined screen-unlock-bypass request (the
+     system requesting a privilege escalation shouldn't be the one
+     approving its own request).
+   - **Found and fixed a real xdg-desktop-portal bug** while
+     prototyping: `RemoteDesktop.CreateSession` crashes the entire
+     portal daemon outright (an assertion failure/core dump, not a
+     graceful D-Bus error) if the options dict is missing
+     `session_handle_token` — required, but not obviously implied by the
+     method's D-Bus introspection signature alone (`a{sv}` gives no hint
+     which keys are mandatory). `systemctl --user reset-failed
+     xdg-desktop-portal` + it being D-Bus-activatable meant it recovered
+     on the next call, but this is worth remembering: a broken portal
+     call can take down the shared daemon for *every* app using portals,
+     not just ZELIA's own request.
+   - **Not yet done:** `click_at`'s positioning accuracy through this
+     backend is unverified (no cursor-position feedback exists for the
+     isolated seat — `input_backend_ydotool.py`'s KWin-scripting readback
+     was seat-specific to the *default* seat, doesn't apply here; the
+     implemented anchor-then-offset strategy is a reasonable guess, not
+     confirmed), and `scroll()` is likewise untested. Live config still
+     pins `input_backend` to `"ydotool"` until these are verified. User
+     explicitly deferred non-browser apps (games, Blender, Steam's UI) to
+     later — this work only needs to cover what's reachable through the
+     portal/CDP paths for now.
+25. ~~Reading a Brave tab required screenshots+OCR+synthetic Page-Down,
+   which (a) is the exact kind of input this project is moving away from
+   (issue 24) and (b) is lossy/slow compared to just asking the browser
+   for its actual content~~ — `cdp_reader.py` talks to Brave's own
+   Chrome DevTools Protocol (remote-debugging) directly instead: `GET
+   /json/list` to find a tab by title/URL hint, then a
+   `Runtime.evaluate` call over the tab's CDP WebSocket for
+   `document.body.innerText` — the exact real page text, zero synthetic
+   input, and not limited to what's currently scrolled into view (reads
+   the whole DOM regardless of scroll position). `browser_control.py`'s
+   `open_browser` now launches Brave via `flatpak run` (not
+   `gtk-launch`, which can't pass extra flags through a `.desktop`
+   file's fixed Exec line) with `--remote-debugging-port=9222` --
+   confirmed this only takes effect on a genuinely fresh launch (Brave
+   is single-instance; a later launch while it's already running just
+   opens a tab in the existing, non-debug-enabled session — `cdp_reader`
+   surfaces a clear error telling the caller to ask for a full restart
+   rather than silently doing something else). Also needed
+   `--remote-allow-origins=http://127.0.0.1:9222` -- Chromium rejects
+   CDP WebSocket connections by Origin header by default (an
+   anti-DNS-rebinding protection), confirmed live via a 403 on the
+   handshake even with the port correctly open and reachable over plain
+   HTTP. Confirmed end-to-end through the real agent pipeline (not just
+   the module standalone): asked "what tabs do I have open in Brave"
+   over the text socket, got an accurate answer matching the actual
+   two-tab state. Note for [[zelia_custom_distro_vision]] (memory) --
+   user explicitly does not want these Brave launch flags carried
+   forward into a future custom-distro version of this project without
+   review; they're a deliberate, acknowledged security/functionality
+   tradeoff for now, not a settled good practice.
 
 Still open:
 
