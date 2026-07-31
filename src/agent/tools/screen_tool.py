@@ -29,7 +29,7 @@ def _session_type() -> str:
     return os.environ.get("XDG_SESSION_TYPE", "x11").lower()
 
 
-def take_screenshot() -> str:
+def take_screenshot(active_window_only: bool = True) -> str:
     """Returns a path to a freshly captured PNG screenshot.
 
     Tries each candidate tool in order and actually runs it rather than
@@ -40,12 +40,24 @@ def take_screenshot() -> str:
     fails at runtime with "compositor doesn't support the screen capture
     protocol" -- found by actually testing screen reading live on a KDE
     Wayland session, not by reading the code. spectacle is KDE's own
-    non-interactive screenshot tool and works there instead."""
+    non-interactive screenshot tool and works there instead.
+
+    active_window_only defaults to True: spectacle's -a captures just the
+    focused window instead of the whole desktop (-f) -- on this project's
+    reference machine (a 3-monitor, 4280x1920 virtual desktop), OCR'ing a
+    full-desktop capture instead of the one relevant window measured at
+    ~4.7s per read_screen_text() call, which multiplies badly for
+    anything that reads the screen repeatedly (page_reader.py's
+    scroll-and-read loop, browser_tabs.py's tab-cycling). grim has no
+    per-window capture option, so this only narrows spectacle's scope --
+    acceptable since grim already doesn't work on this project's actual
+    reference compositor (KWin) anyway, per the note above."""
     path = tempfile.mktemp(prefix="zelia_screenshot_", suffix=".png")
     session = _session_type()
 
     if session == "wayland":
-        candidates = [["grim", path], ["spectacle", "-b", "-n", "-f", "-o", path]]
+        spectacle_scope = "-a" if active_window_only else "-f"
+        candidates = [["grim", path], ["spectacle", "-b", "-n", spectacle_scope, "-o", path]]
     else:
         candidates = [["maim", path], ["scrot", path], ["import", "-window", "root", path]]
 
