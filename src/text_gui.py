@@ -54,18 +54,26 @@ class ChatWindow:
         input_row = tk.Frame(root, bg=BG)
         input_row.pack(fill="x", padx=10, pady=(0, 10))
 
+        # The non-expanding sibling (the button) must be packed BEFORE the
+        # expand=True one (the entry) -- packing them the other way around
+        # left the button collapsed to a 1x1, unmapped widget when input_row
+        # shares its parent with another expand=True widget (self.history
+        # above). Confirmed via isolated reproduction: this is a real Tk
+        # pack() geometry quirk, not a one-off rendering glitch -- found by
+        # actually screenshotting the running GUI, not just eyeballing the
+        # code.
+        self.send_button = tk.Button(
+            input_row, text="Send", command=self._send, bg=YOU_COLOR, fg=BG,
+            font=label_font, relief="flat", padx=16, activebackground=ZELIA_COLOR,
+        )
+        self.send_button.pack(side="right", fill="y", padx=(8, 0))
+
         self.entry = tk.Text(input_row, height=3, bg=PANEL_BG, fg=TEXT_COLOR, insertbackground=TEXT_COLOR,
                               font=body_font, wrap="word", relief="flat", padx=10, pady=8)
         self.entry.pack(side="left", fill="both", expand=True)
         self.entry.bind("<Return>", self._on_enter)
         self.entry.bind("<Shift-Return>", lambda e: None)  # allow shift+enter for a literal newline
         self.entry.focus_set()
-
-        self.send_button = tk.Button(
-            input_row, text="Send", command=self._send, bg=YOU_COLOR, fg=BG,
-            font=label_font, relief="flat", padx=16, activebackground=ZELIA_COLOR,
-        )
-        self.send_button.pack(side="right", fill="y", padx=(8, 0))
 
         if not os.path.exists(self.socket_path):
             self._append("ZELIA isn't running", "error_label",
