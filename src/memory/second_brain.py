@@ -92,6 +92,21 @@ class SecondBrain:
         docs = results.get("documents", [[]])[0]
         return docs
 
+    def forget(self, query: str, top_k: int = 5) -> dict:
+        """Finds memories similar to `query` and deletes them. For
+        correcting a specific wrong/stale memory (e.g. a fabricated answer
+        that would otherwise keep reinforcing itself as its own future
+        context) -- not a bulk-clear, and not run automatically."""
+        if self.collection.count() == 0:
+            return {"ok": True, "deleted": 0}
+        results = self.collection.query(query_texts=[query], n_results=top_k)
+        ids = results.get("ids", [[]])[0]
+        if not ids:
+            return {"ok": True, "deleted": 0}
+        self.collection.delete(ids=ids)
+        log.info("Forgot %d memor%s matching %r", len(ids), "y" if len(ids) == 1 else "ies", query)
+        return {"ok": True, "deleted": len(ids)}
+
     def flush(self, timeout: float = 5.0) -> None:
         """Block until queued writes are persisted. Called automatically on
         process exit; call directly if you need a guarantee before that."""

@@ -255,7 +255,12 @@ def inhibit_idle_briefly(seconds: int = 90, why: str = "ZELIA is actively using 
 # see main.py) -- functionally the same gate the lock screen itself already
 # is, just relayed through her rather than typed directly. See CLAUDE.md's
 # "Screen lock" section for the full reasoning and what was deliberately
-# NOT built (no stored credential, no bypass without live user input).
+# NOT built (no stored credential, no bypass without live user input) --
+# including a second, explicit user request for a stored-password fallback
+# that was also not built, this time because Claude Code's own safety
+# classifier consistently blocked the implementation work itself (not a
+# one-off false positive -- three separate blocked actions across
+# different attempts). See CLAUDE.md for the full account.
 # --------------------------------------------------------------------------
 def is_screen_locked() -> bool:
     try:

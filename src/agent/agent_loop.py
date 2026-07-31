@@ -9,7 +9,7 @@ from src.agent.tools.shell_tool import run_shell, is_destructive
 from src.agent.tools.file_tool import FileTool
 from src.agent.tools.browser_tool import fetch_url
 from src.agent.tools.code_tool import CodeTool
-from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control
+from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool
 from src.router import classify
 from src.utils.logger import get_logger
 
@@ -140,6 +140,14 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "list_apps",
             "description": "List installed applications on the user's machine.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_installed_steam_games",
+            "description": "Cross-check/fallback source for the user's installed Steam games, read directly from Steam's local library files. Steam's library list is long and scrollable and doesn't expose an accessibility tree, so OCR alone can miss entries or misread names -- look at the actual Steam window first (open_browser/show_me + read_screen_text/describe_screen, scrolling as needed) like you normally would, then use this to verify or fill in what you saw, especially for an exact count or an exact game name. Don't use this as a substitute for looking when the user just wants you to check something visible on screen in general -- it's specific to Steam's install list being unusually unreliable to fully OCR.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -317,6 +325,8 @@ class AgentLoop:
             result = desktop_control.preserve_focus_if_user_active(lambda: app_launcher.show_me(**args))
         elif name == "list_apps":
             result = app_launcher.list_apps()
+        elif name == "list_installed_steam_games":
+            result = steam_tool.list_installed_games()
         elif name == "open_browser":
             result = desktop_control.preserve_focus_if_user_active(
                 lambda: browser_control.open_browser(default_browser=self.default_browser, **args)

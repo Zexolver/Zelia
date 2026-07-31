@@ -19,6 +19,7 @@ evdev
 # Screen / vision
 pillow
 pytesseract
+pygobject   # AT-SPI accessibility-tree access (atspi_tool.py) -- needs at-spi2-core installed system-wide too
 
 # Second brain (long-term memory)
 chromadb

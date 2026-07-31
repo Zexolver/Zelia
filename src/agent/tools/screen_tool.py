@@ -73,11 +73,21 @@ def _has(binary: str) -> bool:
 
 
 def read_screen_text() -> dict:
-    """OCR everything currently visible on screen."""
+    """Reads whatever text is currently visible. Prefers AT-SPI -- the
+    focused app's actual live accessibility tree, real text content rather
+    than an image-to-text guess, and the same channel real screen-reader
+    tech uses (not a screenshot, not bypassing the app). Falls back to OCR
+    only for apps that don't expose one at all (most Electron/CEF apps,
+    e.g. Steam -- confirmed absent from the AT-SPI desktop tree)."""
+    from src.agent.tools import atspi_tool
+    atspi_result = atspi_tool.read_focused_app()
+    if atspi_result.get("ok"):
+        return {"ok": True, "text": atspi_result["text"], "source": "atspi", "app": atspi_result.get("app")}
+
     path = take_screenshot()
     try:
         text = pytesseract.image_to_string(Image.open(path))
-        return {"ok": True, "text": text.strip()}
+        return {"ok": True, "text": text.strip(), "source": "ocr"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
     finally:

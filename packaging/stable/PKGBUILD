@@ -16,11 +16,13 @@ depends=(
     'wmctrl'
     'ydotool'
     'portaudio'
+    'at-spi2-core'
 )
 optdepends=(
     'vulkan-radeon: Ollama GPU acceleration on AMD (small brain + vision model)'
+    'spectacle: KDE Wayland screenshot fallback (screen_tool.py)'
 )
-makedepends=('python-virtualenv' 'git')
+makedepends=('python-virtualenv' 'git' 'gobject-introspection' 'cairo')
 provides=('zelia')
 conflicts=('zelia-git')
 source=("zelia-${pkgver}.tar.gz::https://github.com/Zexolver/Zelia/archive/refs/tags/v${pkgver}.tar.gz")

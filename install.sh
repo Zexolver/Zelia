@@ -56,6 +56,10 @@ PACMAN_PKGS=(
     wmctrl
     ydotool
     portaudio
+    at-spi2-core
+    gobject-introspection
+    cairo
+    spectacle
 )
 if [ "$GPU_VENDOR" = "amd" ]; then
     PACMAN_PKGS+=(vulkan-radeon lib32-vulkan-radeon vulkan-icd-loader)
