@@ -176,6 +176,33 @@ socket.
   method (finds + deletes memories matching a query -- not exposed as an
   agent-callable tool given the demonstrated tool-calling reliability
   gaps around anything destructive-ish).
+- **Multi-tab browser reading** (`browser_tabs.read_all_tabs`): explicit
+  user request -- "read all active tabs," which a single screenshot
+  fundamentally can't do (only one tab is ever visually composited at a
+  time). Cycles tabs with Ctrl+Tab (the standard Chromium/Firefox
+  shortcut) and reads each one via `screen_tool.read_screen_text`,
+  stopping once it sees content matching a tab already read (cycled back
+  to the start) or after `MAX_TABS` (15). Deliberately doesn't try to
+  explicitly focus the browser window itself first -- `xdotool`-based
+  window queries/activation aren't reliable for native-Wayland clients
+  like Brave (confirmed: it runs with `--ozone-platform=wayland`, not
+  XWayland, so it's invisible to X11-rooted tools the way a Tk window or
+  an XWayland-bridged app isn't) -- callers should `show_me`/
+  `open_browser` first so the browser is already focused going in. Each
+  tab's text capped at 1500 chars so 15 tabs' worth of OCR doesn't swamp
+  the small brain's context. Registered in `SCREEN_VISIBILITY_TOOLS`, so
+  it goes through the same lock-check/idle-inhibit as every other
+  screen-reading tool. Not yet tested live (blocked on the session being
+  unlocked, same as the chat GUI and input lock above).
+- **Stored preference**: Gemini AI (`gemini.google.com`) → Brave browser,
+  everything else stays on the Floorp default. Stored via
+  `second_brain.remember()` per explicit user request ("make sure she has
+  a memory that..."), not a hardcoded rule in `browser_control.py` --
+  this means it's subject to the same recall-reliability caveats as any
+  other memory (see Known Issues #11's model-comparison note). If this
+  preference doesn't reliably get honored in practice, that's the
+  known gap, not a new bug -- consider a real per-domain override table
+  in `browser_control.py` instead of relying on recall, if it comes up.
 - App launching/focusing + "show me X" (`app_launcher.py`): matches
   installed `.desktop` entries, focuses if already running, falls back to
   file/folder path then URL/web search.

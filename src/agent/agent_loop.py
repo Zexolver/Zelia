@@ -10,7 +10,7 @@ from src.agent.tools.shell_tool import run_shell, is_destructive
 from src.agent.tools.file_tool import FileTool
 from src.agent.tools.browser_tool import fetch_url
 from src.agent.tools.code_tool import CodeTool
-from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool
+from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool, browser_tabs
 from src.router import classify
 from src.utils.logger import get_logger
 
@@ -109,6 +109,14 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_screen_text",
             "description": "Read all text currently visible on the user's screen via OCR. Use for 'what does this say', 'read this', reading errors/labels/etc.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_all_browser_tabs",
+            "description": "Reads every open tab in whatever browser window is currently focused, by actually cycling through them with Ctrl+Tab and reading each one (stops automatically when it cycles back to the start). Use this specifically for 'what tabs do I have open', 'read all my tabs', or checking content across multiple open tabs -- for a single visible tab/page, use read_screen_text instead, it's faster. Make sure the browser is actually focused first (show_me/open_browser) before calling this.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -279,7 +287,7 @@ def _find_leaked_tool_calls(content: str) -> list[tuple[str, dict]]:
     return found
 
 
-SCREEN_VISIBILITY_TOOLS = {"read_screen_text", "describe_screen", "find_text_on_screen", "click_at"}
+SCREEN_VISIBILITY_TOOLS = {"read_screen_text", "describe_screen", "find_text_on_screen", "click_at", "read_all_browser_tabs"}
 
 
 class AgentLoop:
@@ -346,6 +354,8 @@ class AgentLoop:
             result = self.code.run(**args)
         elif name == "read_screen_text":
             result = screen_tool.read_screen_text()
+        elif name == "read_all_browser_tabs":
+            result = browser_tabs.read_all_tabs()
         elif name == "describe_screen":
             result = screen_tool.describe_screen(args.get("question", ""), self.vision_model, self.ollama_host)
         elif name == "show_me":
