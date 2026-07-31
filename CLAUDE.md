@@ -631,6 +631,24 @@ computer, including when Claude Code session limits are hit).
      showed up as failed "Release APK" runs before this was diagnosed,
      which was initially confusing since the trigger config only lists
      tag pushes.
+- **Reply notifications + second-brain viewer** (v0.3.0): two more user
+  requests, added together. Notifications post via
+  `flutter_local_notifications` when a reply arrives, but only if the app
+  isn't actually in the foreground (`WidgetsBindingObserver` tracks
+  `AppLifecycleState` in `chat_screen.dart`) — avoids a redundant
+  notification when the user's already looking at the reply. Needed core
+  library desugaring enabled in `build.gradle.kts` (the plugin requires
+  it) and the Android 13+ `POST_NOTIFICATIONS` runtime permission
+  (`permission_handler`). The second-brain viewer is a new screen listing
+  ZELIA's stored memories newest-first, talking to a new
+  `GET /memories` endpoint on `remote_bridge.py` — a deliberate, narrow
+  exception to that module's "just a `zelia.sock` client" design (see its
+  docstring), since browsing stored memories isn't something the chat
+  protocol has a way to ask for. Backed by a new
+  `SecondBrain.list_recent()` method — chromadb's `get()` has no
+  server-side ordering, so it fetches everything and sorts by the
+  timestamp `remember()` already stores; fine at this project's current
+  scale, would need real pagination if the collection grows very large.
 - Explicitly deferred to later, low priority (user's own words: "making
   that actually work is very low priority"): registering the app as an
   Android digital-assistant app (the `VoiceInteractionService`/Assist API
