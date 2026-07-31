@@ -15,8 +15,10 @@ Wayland: no single protocol covers this across compositors, so:
 """
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 import time
 
 import pytesseract
@@ -129,11 +131,159 @@ def press_key(combo: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+# --------------------------------------------------------------------------
+# Mouse positioning (Wayland) -- see click_at()'s docstring for why this
+# exists instead of a plain `ydotool mousemove --absolute` call.
+# --------------------------------------------------------------------------
+_KWIN_CURSOR_POS_RE = re.compile(r"KWIN_CURSOR_POS_(?P<marker>[0-9a-f]{8}):(?P<x>-?\d+),(?P<y>-?\d+)")
+
+
+def _damped_step(delta: int, frac: float = 0.3, max_step: int = 250, min_step: int = 8) -> int:
+    """Used by click_at()'s homing loop -- see its comment for why a
+    straight proportional move isn't safe here."""
+    if delta == 0:
+        return 0
+    step = int(delta * frac)
+    if abs(step) < min_step:
+        step = min_step if delta > 0 else -min_step
+    if abs(step) > max_step:
+        step = max_step if delta > 0 else -max_step
+    if abs(step) > abs(delta):
+        step = delta
+    return step
+
+
+def _kwin_cursor_pos() -> tuple[int, int] | None:
+    """Reads the *real* cursor position straight from the compositor via a
+    throwaway KWin script (org.kde.kwin.Scripting -- runs inside KWin's own
+    process, so unlike ScreenShot2 it isn't gated behind the same
+    unprivileged-client authorization wall). `workspace.cursorPos` is
+    read-only in this KWin scripting API (confirmed live: writing to it
+    raises 'Cannot assign to read-only property'), so this can't warp the
+    cursor directly -- it's only used as ground truth for click_at()'s
+    homing loop below. Returns None if anything about this fails (no
+    busctl, KWin not running, script errored) so callers can fall back."""
+    if not _has("busctl"):
+        return None
+    marker = os.urandom(4).hex()
+    script = f'print("KWIN_CURSOR_POS_{marker}:" + workspace.cursorPos.x + "," + workspace.cursorPos.y);'
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script)
+            path = f.name
+
+        out = subprocess.check_output(
+            ["busctl", "--user", "call", "org.kde.KWin", "/Scripting",
+             "org.kde.kwin.Scripting", "loadScript", "s", path],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        script_id = out.split()[1]
+        subprocess.run(
+            ["busctl", "--user", "call", "org.kde.KWin", f"/Scripting/Script{script_id}",
+             "org.kde.kwin.Script", "run"],
+            capture_output=True, timeout=5,
+        )
+        subprocess.run(
+            ["busctl", "--user", "call", "org.kde.KWin", "/Scripting",
+             "org.kde.kwin.Scripting", "unloadScript", "s", path],
+            capture_output=True, timeout=5,
+        )
+
+        journal = subprocess.check_output(
+            ["journalctl", "--user", "_COMM=kwin_wayland", "--since=-3s", "--no-pager"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        for line in reversed(journal.splitlines()):
+            m = _KWIN_CURSOR_POS_RE.search(line)
+            if m and m.group("marker") == marker:
+                return int(m.group("x")), int(m.group("y"))
+        return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
+            IndexError, ValueError):
+        return None
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def click_at(x: int, y: int) -> dict:
+    """Clicks at real screen pixel coordinates (x, y).
+
+    On Wayland, `ydotool mousemove --absolute` does NOT map to real screen
+    pixels -- confirmed by inspecting the ydotoold virtual device directly
+    via python-evdev: it only advertises EV_KEY and EV_REL capabilities, no
+    EV_ABS axis exists at all, so "--absolute" is really ydotool
+    internally tracking its own assumed position and converting to a
+    relative move from *that* guess, with no way to ever resync against
+    where the real compositor cursor actually is (see CLAUDE.md known
+    issues for the full writeup).
+
+    On KDE/KWin, this uses a proper closed-loop fix instead: read the
+    REAL cursor position via a KWin script (_kwin_cursor_pos(), runs
+    inside KWin's own process so it's authoritative), send a relative
+    ydotool move for the remaining delta (EV_REL is genuinely supported),
+    re-measure, and repeat until within a couple pixels of the target or a
+    small iteration cap is hit -- self-correcting regardless of any
+    pointer-acceleration curve distorting the exact relationship between a
+    commanded relative delta and the actual resulting movement (confirmed
+    live: a single relative move of (100, 100) actually landed at
+    (107, 107), i.e. not 1:1 -- the homing loop absorbs that instead of
+    needing an exact acceleration model). Falls back to the old
+    best-effort single absolute move if KWin's cursor-position readback
+    isn't available (non-KDE Wayland compositor, or busctl/journalctl
+    unavailable)."""
     session = _session_type()
     try:
         if session == "wayland" and _has("ydotool"):
-            subprocess.run(["ydotool", "mousemove", "--absolute", "-x", str(x), "-y", str(y)], check=True)
+            homed = False
+            last_pos = None
+            got_readback = False
+            for _ in range(35):
+                pos = _kwin_cursor_pos()
+                if pos is None:
+                    break
+                got_readback = True
+                last_pos = pos
+                cx, cy = pos
+                dx, dy = x - cx, y - cy
+                if abs(dx) <= 4 and abs(dy) <= 4:
+                    homed = True
+                    break
+                # Damped, capped step -- NOT a straight proportional (dx, dy)
+                # move. Confirmed live that ydotool's relative-move "gain"
+                # (actual pixels moved per requested pixel) is inconsistent
+                # and sometimes close to 2x, not a clean 1:1 or fixed
+                # multiplier -- a naive proportional correction overshoots
+                # past the target and oscillates back and forth forever
+                # instead of converging (reproduced live: bounced between
+                # opposite sides of a 2000px target for 8 straight
+                # iterations without narrowing). Capping each step to at
+                # most 30% of the remaining distance (and at most 250px
+                # outright) keeps the loop convergent even under an unknown
+                # per-step gain up to ~2x.
+                step_x = _damped_step(dx)
+                step_y = _damped_step(dy)
+                subprocess.run(["ydotool", "mousemove", "--", str(step_x), str(step_y)], check=True)
+                time.sleep(0.08)
+            if not homed:
+                if got_readback and last_pos is not None:
+                    # Didn't converge within the iteration cap, but we do
+                    # have a real, verified position from the compositor --
+                    # click there rather than discarding that progress for
+                    # a blind absolute jump (see below).
+                    log.warning("click_at homing didn't fully converge (ended near %s, target %s) -- clicking there anyway.",
+                                last_pos, (x, y))
+                else:
+                    # No working KWin readback at all (non-KDE compositor,
+                    # or busctl/journalctl unavailable) -- fall back to the
+                    # old best-effort absolute move. Known to not reliably
+                    # map to real pixels (see docstring), but it's the only
+                    # option left.
+                    subprocess.run(["ydotool", "mousemove", "--absolute", "-x", str(x), "-y", str(y)], check=True)
             subprocess.run(["ydotool", "click", "0xC0"], check=True)  # left click
         elif _has("xdotool"):
             subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1"], check=True)
@@ -231,17 +381,78 @@ def focus_window(name: str) -> dict:
     return {"ok": False, "error": "No window-focus mechanism available on this Wayland compositor -- new windows should already be focused on launch."}
 
 
+def _kwin_active_window_title() -> str | None:
+    """What window is focused *right now*, via the same KWin-scripting
+    mechanism as _kwin_cursor_pos() -- used so preserve_focus_if_user_active()
+    can remember the user's window before ZELIA focuses something else of
+    her own, and hand that title back to focus_window() afterward to
+    restore it. Returns "" (not None) if nothing is focused, None if the
+    query itself failed (no busctl, KWin not running, etc)."""
+    if not _has("busctl"):
+        return None
+    marker = os.urandom(4).hex()
+    script = (
+        f'var w = workspace.activeWindow;\n'
+        f'print("KWIN_ACTIVE_{marker}:" + (w ? w.caption : ""));'
+    )
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script)
+            path = f.name
+        out = subprocess.check_output(
+            ["busctl", "--user", "call", "org.kde.KWin", "/Scripting",
+             "org.kde.kwin.Scripting", "loadScript", "s", path],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        script_id = out.split()[1]
+        subprocess.run(
+            ["busctl", "--user", "call", "org.kde.KWin", f"/Scripting/Script{script_id}",
+             "org.kde.kwin.Script", "run"],
+            capture_output=True, timeout=5,
+        )
+        subprocess.run(
+            ["busctl", "--user", "call", "org.kde.KWin", "/Scripting",
+             "org.kde.kwin.Scripting", "unloadScript", "s", path],
+            capture_output=True, timeout=5,
+        )
+        journal = subprocess.check_output(
+            ["journalctl", "--user", "_COMM=kwin_wayland", "--since=-3s", "--no-pager"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        prefix = f"KWIN_ACTIVE_{marker}:"
+        for line in reversed(journal.splitlines()):
+            idx = line.find(prefix)
+            if idx != -1:
+                return line[idx + len(prefix):]
+        return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, IndexError):
+        return None
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 # --------------------------------------------------------------------------
 # Focus-steal guard -- if the user is actively at the keyboard/mouse right
 # now, ZELIA opening/focusing a window for herself shouldn't yank focus away
 # from whatever they're doing. Captures whatever was focused before the
 # action runs and restores it afterward if the user appears active
-# (src/idle_detect.py). Xorg only for now via xdotool -- same "best-effort
-# on Wayland" situation as focus_window above, since restoring focus needs
-# the same window-activation mechanism that's already Wayland-limited there.
+# (src/idle_detect.py). On KDE/KWin Wayland this now actually works, via
+# _kwin_active_window_title() to capture and focus_window() to restore --
+# previously _get_active_window_id() unconditionally returned None on any
+# Wayland session (xdotool can't see the active window there at all), so
+# the restore step was silently dead code on this project's actual
+# reference platform the whole time. Still xdotool-only (best-effort) on
+# non-KWin Wayland compositors.
 # --------------------------------------------------------------------------
 def _get_active_window_id() -> str | None:
-    if _session_type() == "wayland" or not _has("xdotool"):
+    if _session_type() == "wayland":
+        return _kwin_active_window_title()
+    if not _has("xdotool"):
         return None
     try:
         return subprocess.check_output(["xdotool", "getactivewindow"], text=True).strip()
@@ -270,7 +481,10 @@ def preserve_focus_if_user_active(action):
         window_highlight.highlight_window(new_window)
 
     if user_was_active and previous:
-        subprocess.run(["xdotool", "windowactivate", previous], capture_output=True)
+        if _session_type() == "wayland":
+            focus_window(previous)
+        else:
+            subprocess.run(["xdotool", "windowactivate", previous], capture_output=True)
         log.info("Restored focus to previous window (user was active)")
     return result
 

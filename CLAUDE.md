@@ -256,13 +256,34 @@ actively working in.
   input devices, permissions).
 - `desktop_control.preserve_focus_if_user_active(action)` wraps the four
   tool-dispatch points that can change window focus in `agent_loop.py`
-  (`run_in_terminal`, `open_browser`, `show_me`, `focus_window`): captures
-  the previously-active window, runs the action, and — only if the user
-  was active — restores focus to that previous window afterward. Xorg
-  only for now (`xdotool getactivewindow`/`windowactivate`); best-effort
-  on Wayland is the same situation as `focus_window` already documented
-  below (no cross-compositor way to query/restore a specific window's
-  focus outside wlroots-specific tools).
+  (`run_in_terminal`, `open_browser`, `show_me`, `focus_window`), plus
+  `browser_tabs.read_all_tabs`: captures the previously-active window,
+  runs the action, and — only if the user was active — restores focus to
+  that previous window afterward. **Was silently dead on KDE/GNOME Wayland
+  the whole time** until this session: `_get_active_window_id()`
+  unconditionally returned `None` on any Wayland session (it only ever
+  tried `xdotool getactivewindow`, which can't see the active window on
+  Wayland at all), so `previous` was always falsy and the restore branch
+  never ran on this project's actual reference platform. Fixed on KDE
+  specifically alongside the `click_at`/`focus_window` KWin work (issues
+  18, 21): added `_kwin_active_window_title()`, which reads
+  `workspace.activeWindow.caption` via the same throwaway-KWin-script
+  mechanism as `_kwin_cursor_pos()`, and made the restore step call
+  `focus_window(previous)` (the KWin window-matcher path) instead of
+  `xdotool windowactivate` when on Wayland. Confirmed live: captured a
+  window's title, focused a different window, restored the original by
+  title, re-verified via another capture that it actually landed back
+  correctly. Still xdotool-only (best-effort, likely still not working)
+  on non-KWin Wayland compositors — same caveat as everywhere else this
+  session's KWin-scripting fixes apply. Note this does NOT make focus
+  changes invisible, only brief: Wayland's input security model requires
+  a window to actually be focused before it can receive synthetic
+  keystrokes at all, and KWin's own screenshot D-Bus API
+  (`org.kde.KWin.ScreenShot2`) refuses unauthorized clients outright
+  (confirmed live: `CaptureWindow` raised `NoAuthorized` for this
+  project's own unprivileged process) -- there's a real, deliberate
+  platform security boundary in the way of true invisible background
+  window reading, this isn't a missing feature to build around.
 - `window_highlight.py` draws a purple (`#a020f0`) outline — four thin,
   borderless, always-on-top strip windows around the target window's
   edges, not one overlay covering it, so content is never obscured —
@@ -753,53 +774,83 @@ first rather than assuming the existing code is still correct.
    same mistake on a different long-but-ordinary request). Confirmed fixed
    by re-running the identical request after the prompt change: routed to
    'small', tools were actually called.
-20. ~~`game_guard`'s GPU-hog detector misfired on ZELIA's own small-brain
-   inference~~ — found immediately after the issue 19 fix let a real
-   Ollama tool-calling turn actually run: `rocm-smi --showpids` reports
-   *any* process using the AMD GPU compute queue, and `_gpu_hog_match()`
-   only ever excluded ZELIA's own PID, not Ollama's (a separate systemd
-   service process). Before this session's Vulkan GPU-acceleration fix for
-   Ollama (issue 10), this was harmless -- Ollama ran CPU-only and never
-   showed up in `rocm-smi` at all. Once Ollama started actually using the
-   GPU, *every* normal small-brain chat turn made `game_guard` think an
-   external process was gaming, deprioritizing ZELIA's own process and
-   blocking her own AirLLM queue -- self-inflicted throttling on
-   completely routine activity. Confirmed live: `journalctl` showed
-   "Gaming state changed -> GAMING" firing right after an ordinary
-   tool-calling turn with nothing actually running. Added
-   `OWN_BACKEND_PROCESS_NAMES = {"ollama", "ollama_llama_server"}` and an
-   `_is_foreign_gpu_pid()` check that looks up the reported PID's process
-   name via `psutil` before counting it as "foreign" GPU usage. Confirmed
-   fixed: re-ran the same Ollama-backed request post-fix, no gaming-state
-   flip in the logs. Worth remembering if STT/TTS ever gain GPU
-   acceleration too (currently CPU-only per `config.yaml`) -- they'd need
-   the same exclusion.
+21. ~~`click_at` was not just imprecise, it was fundamentally
+   unreliable~~ — `ydotool mousemove --absolute -x -y` does *not* map to
+   real screen pixels: inspected the `ydotoold` virtual device directly
+   via `python-evdev` (`dev.capabilities()`), and it only advertises
+   `EV_KEY` and `EV_REL` — no `EV_ABS` axis exists on the device at all,
+   so "absolute" positioning was really ydotool internally tracking its
+   own assumed cursor position with no way to ever resync against where
+   the real compositor cursor actually is. Confirmed live multiple times:
+   fed it real on-screen coordinates and the click landed somewhere else
+   entirely. Fixed on KDE/KWin with a genuinely different approach:
+   `_kwin_cursor_pos()` reads the *real* cursor position straight from the
+   compositor via a throwaway KWin script (`org.kde.kwin.Scripting` --
+   runs inside KWin's own process, so it's authoritative and, unlike
+   `ScreenShot2`, isn't gated behind an unprivileged-client authorization
+   wall). `workspace.cursorPos` turned out to be read-only in this KWin
+   scripting API (confirmed live: writing to it raises "Cannot assign to
+   read-only property"), so it can't warp the cursor directly -- instead
+   `click_at()` now runs a closed-loop homing routine: read the real
+   position, send a *relative* `ydotool mousemove` (`EV_REL` is genuinely
+   supported) for a damped, capped fraction of the remaining distance, and
+   repeat until within a few pixels or an iteration cap. The damping
+   turned out to matter a lot, not just be defensive: ydotool's relative-
+   move "gain" (actual pixels moved per requested pixel) is inconsistent
+   at different magnitudes -- confirmed live moving the same nominal
+   distance landed anywhere from roughly 1:1 to almost 2:1 -- so a naive
+   proportional correction overshoots the target and *oscillates
+   indefinitely* (reproduced live: bounced between opposite sides of a
+   target for 8 straight iterations without narrowing). Capping each step
+   to at most 30% of the remaining distance (250px max) keeps it
+   convergent regardless. Also had to actually learn this machine's real
+   monitor geometry via KWin scripting (`workspace.screens`) after an
+   early test looked "stuck" -- turned out the test target simply wasn't a
+   valid point on any monitor (three displays here, at different x/y
+   offsets and sizes, not one simple rectangle: DP-3 0,0 1080x1920;
+   HDMI-A-1 1080,896 1280x1024; DVI-D-1 2360,484 1920x1080) -- the loop
+   was correctly clamping at the real screen boundary, not malfunctioning.
+   Confirmed fixed against a genuinely valid on-screen target: converged
+   to within 3px in 17 iterations. Falls back to the old best-effort
+   absolute move only if KWin's readback is entirely unavailable (non-KDE
+   Wayland compositor, or `busctl`/`journalctl` missing) -- on GNOME or
+   non-KWin wlroots compositors this bug is therefore still present, same
+   caveat as issue 18's window-focus fix.
 
 Still open:
 
-17. **`click_at` (`desktop_control.py`) is not just imprecise, it's
-   fundamentally unreliable** — found while testing the desktop chat GUI.
-   `ydotool mousemove --absolute -x -y` does *not* map to real screen
-   pixels: inspected the `ydotoold virtual device` directly via
-   `python-evdev` (`dev.capabilities()`), and it only advertises `EV_KEY`
-   and `EV_REL` — no `EV_ABS` axis exists on the device at all. So
-   "absolute" positioning is ydotool internally tracking its own assumed
-   cursor position and converting to a relative move from *that*, with no
-   way to ever resync against where the real compositor cursor actually
-   is. Confirmed live: fed it the exact on-screen pixel coordinates of a
-   dialog button (cross-checked via `wmctrl -l -G` and a pixel-measured
-   screenshot crop) and the click landed somewhere else entirely, twice.
-   `press_key` is unaffected (`EV_KEY` only, no coordinates involved) —
-   this only breaks tools that need to click a specific point:
-   `click_at` and, by extension, anything built on top of it. Not
-   attempted yet: likely fix is querying the compositor for true cursor
-   position before each absolute move (no obvious KWin/Wayland-portal API
-   for this was found during this session) or switching whatever backs
-   `click_at` to something that maintains a real `EV_ABS`-capable virtual
-   pointer. Also affects future work item #1 below (AT-SPI-driven
-   clicking would sidestep this for apps where AT-SPI is available at
-   all, but Chromium/CEF apps like Steam and Brave still have no AT-SPI
-   tree, so this remains a real gap for those).
+20. **`game_guard`'s `\.exe$` pattern has a confirmed false-positive mode
+   on this dev machine, and the GPU-hog detector had a related latent gap**
+   (defended against, but not actually what's firing here -- see below).
+   Originally diagnosed as "Ollama's own GPU usage misdetected as gaming"
+   after seeing `journalctl` show "Gaming state changed -> GAMING" right
+   after an ordinary Ollama tool-calling turn. Added
+   `OWN_BACKEND_PROCESS_NAMES = {"ollama", "ollama_llama_server"}` and an
+   `_is_foreign_gpu_pid()` check (looks up the reported PID's process name
+   via `psutil` before counting it as "foreign" GPU usage) -- this is
+   correct defensive code and worth keeping (would matter the moment
+   `rocm-smi` gets installed, or if STT/TTS ever gain GPU acceleration,
+   currently CPU-only per `config.yaml`), **but turned out not to be the
+   actual cause here**: `rocm-smi` isn't even installed on this machine
+   (confirmed: `which rocm-smi` → not found), so `_gpu_hog_match()` always
+   silently returns `False` regardless of this fix -- the GPU path was
+   never what fired. Re-investigated after the same "GAMING" flip recurred
+   post-fix: the real match was `_process_match()`, specifically the broad
+   `\.exe$` pattern (meant to catch Wine/Proton games, which commonly run
+   as some-game.exe) matching a process literally named `claude.exe` --
+   confirmed via a direct psutil scan against `DEFAULT_PATTERNS`. This
+   machine runs several *other*, unrelated Claude Code agent sessions
+   concurrently (visible throughout this session's screenshots -- separate
+   projects, separate terminals) and one of them apparently has a
+   `claude.exe` process running for its own unrelated reason; `game_guard`
+   has no way to distinguish "a real Wine/Proton game process" from
+   "literally any other process that happens to end in .exe" by name
+   alone, so it isn't actually wrong given its design, just imprecise in a
+   way this specific multi-agent dev machine exposes more than a typical
+   single-user desktop would. Not fixed -- hardcoding an exclusion for
+   "claude.exe" specifically would be overfit to this one machine's
+   coincidental process name, not a real solution.
+
 5. `press_key`'s Wayland path (`desktop_control.py`, `YDOTOOL_KEYS`) only
    has a handful of key combos mapped — extend as needed.
 5b. Window focus still has no implementation on GNOME Wayland or non-KWin
