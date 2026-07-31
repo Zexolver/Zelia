@@ -167,6 +167,12 @@ screen:
 desktop:
   default_browser: "floorp"    # say "use <browser> for this" to override once,
                                  # or "always use <browser>" to change this permanently
+  input_backend: "portal"      # "portal" (default): keyboard/mouse via org.freedesktop.portal.RemoteDesktop,
+                                 # a genuinely isolated input path that doesn't touch your real mouse/keyboard
+                                 # (needs your desktop environment's portal backend + compositor to support the
+                                 # transient-seat protocol -- KWin 6.6+, Mutter 49.2+, wlroots 0.18+ all do).
+                                 # "ydotool": legacy fallback, real input synthesis that shares your actual
+                                 # devices -- only needed if the portal path isn't available on your setup.
 
 # ---------------------------------------------------------------------------
 # Remote bridge (mobile app / anything off-machine)

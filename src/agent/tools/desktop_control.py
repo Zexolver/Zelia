@@ -2,20 +2,22 @@
 Real desktop control -- opens a visible terminal for commands, types/clicks
 into whatever window has focus, and works on both Xorg and Wayland.
 
-Xorg: xdotool handles typing, key combos, and clicking directly.
-Wayland: no single protocol covers this across compositors, so:
-  - typing/key combos/clicking go through ydotool, which operates at the
-    kernel uinput level and therefore works regardless of compositor
-    (needs ydotoold running and the user in the 'input' group -- install.sh
-    sets this up).
-  - window focusing is best-effort: tried via wlrctl/swaymsg on
-    wlroots-based compositors (Sway, Hyprland); on GNOME/KDE Wayland there's
-    no standard way to do this from outside, so it's skipped there and we
-    just rely on newly-launched windows already having focus.
+type_text/press_key/click_at delegate to a swappable input backend (see
+the "Keyboard / mouse input backend selection" section below) -- by
+default that's org.freedesktop.portal.RemoteDesktop, a genuinely isolated
+input path that doesn't touch the user's real mouse/keyboard
+(input_backend_portal.py). input_backend_ydotool.py (real input
+synthesis, shares the user's actual devices) is kept as an opt-in
+fallback for compositors/portal backends where that isn't available yet.
+
+Window focusing is best-effort: tried via wlrctl/swaymsg on wlroots-based
+compositors (Sway, Hyprland), and via KWin's own D-Bus window matcher on
+KDE (see _focus_window_kwin below) -- on other Wayland compositors there's
+no standard way to do this from outside, so it's skipped there and we
+just rely on newly-launched windows already having focus.
 """
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -43,11 +45,14 @@ TERMINAL_RUN_FLAGS = {
 }
 
 # Minimal symbolic-name -> ydotool key sequence map for the combos this
-# project actually needs (address bar focus, new tab, enter, tab/escape).
-# xdotool takes symbolic names directly and needs none of this.
+# project actually needs (address bar focus, new tab, enter, tab/escape,
+# scrolling a long page -- see page_reader.py). xdotool takes symbolic
+# names directly and needs none of this.
 YDOTOOL_KEYS = {
     "ctrl": "29", "alt": "56", "shift": "42", "super": "125",
     "enter": "28", "tab": "15", "escape": "1", "l": "38", "t": "20",
+    "space": "57", "pagedown": "109", "pageup": "104",
+    "down": "108", "up": "103", "end": "107", "home": "102",
 }
 
 
@@ -94,204 +99,68 @@ def open_terminal(command: str | None = None, keep_open: bool = True, cwd: str |
 
 
 # --------------------------------------------------------------------------
-# Typing / key combos
+# Keyboard / mouse input backend selection
+#
+# ZELIA has no separate synthetic input device of her own on this platform
+# by default -- ydotool's virtual device shares the one real system cursor
+# and keyboard focus with the user's actual physical devices (confirmed:
+# no separate visible/independent pointer exists in the standard Wayland
+# single-seat model). Explicit user requirement: her actions must not
+# interfere with the user's own mouse/keyboard while they're using the
+# computer (e.g. gaming, using Blender) at the same time.
+#
+# The fix is org.freedesktop.portal.RemoteDesktop -- a standard XDG
+# Desktop Portal interface, backed by the compositor's transient-seat
+# protocol (ext-transient-seat-v1) where implemented, that creates a
+# genuinely isolated input seat instead of injecting into the real one.
+# This is NOT KDE-specific: it's a standard portal interface, implemented
+# by multiple desktop environments' own portal backends (confirmed via
+# wayland.app's compositor compatibility matrix: KWin 6.6+, Mutter 49.2+,
+# wlroots-based compositors via wlroots 0.18+, and others) -- whichever
+# portal backend + compositor combination the user's desktop environment
+# ships handles the actual seat isolation, this code just talks to the
+# standard portal API. See input_backend_portal.py's module docstring for
+# the full story (including the one-time consent dialog this requires).
+#
+# input_backend_ydotool.py is kept as an opt-in fallback (config.yaml:
+# desktop.input_backend: "ydotool") for compositors/portal backends where
+# the portal approach isn't available yet -- shares the real cursor and
+# keyboard, same caveat as always with that approach.
 # --------------------------------------------------------------------------
-def type_text(text: str) -> dict:
-    session = _session_type()
-    try:
-        if session == "wayland" and _has("ydotool"):
-            subprocess.run(["ydotool", "type", text], check=True)
-        elif _has("xdotool"):
-            subprocess.run(["xdotool", "type", "--clearmodifiers", text], check=True)
+_input_backend_module = None
+
+
+def _input_backend():
+    global _input_backend_module
+    if _input_backend_module is None:
+        backend_name = "portal"
+        try:
+            from src.config import load_config
+            backend_name = load_config().get("desktop", {}).get("input_backend", "portal")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not read desktop.input_backend from config (%s) -- defaulting to 'portal'.", exc)
+
+        if backend_name == "ydotool":
+            from src.agent.tools import input_backend_ydotool as backend
         else:
-            return {"ok": False, "error": "Neither xdotool nor ydotool is available."}
-        return {"ok": True}
-    except subprocess.CalledProcessError as exc:
-        return {"ok": False, "error": str(exc)}
+            from src.agent.tools import input_backend_portal as backend
+        _input_backend_module = backend
+    return _input_backend_module
+
+
+def type_text(text: str) -> dict:
+    return _input_backend().type_text(text)
 
 
 def press_key(combo: str) -> dict:
     """combo like 'ctrl+l', 'ctrl+t', 'Return', 'Tab', 'Escape'."""
-    session = _session_type()
-    try:
-        if session == "wayland" and _has("ydotool"):
-            parts = [p.strip().lower() for p in combo.split("+")]
-            codes = [YDOTOOL_KEYS.get(p) for p in parts]
-            if any(c is None for c in codes):
-                return {"ok": False, "error": f"Key combo '{combo}' isn't in the ydotool keymap yet -- add it to YDOTOOL_KEYS."}
-            down = [f"{c}:1" for c in codes]
-            up = [f"{c}:0" for c in reversed(codes)]
-            subprocess.run(["ydotool", "key", *down, *up], check=True)
-        elif _has("xdotool"):
-            subprocess.run(["xdotool", "key", combo.replace("+", "+")], check=True)
-        else:
-            return {"ok": False, "error": "Neither xdotool nor ydotool is available."}
-        return {"ok": True}
-    except subprocess.CalledProcessError as exc:
-        return {"ok": False, "error": str(exc)}
-
-
-# --------------------------------------------------------------------------
-# Mouse positioning (Wayland) -- see click_at()'s docstring for why this
-# exists instead of a plain `ydotool mousemove --absolute` call.
-# --------------------------------------------------------------------------
-_KWIN_CURSOR_POS_RE = re.compile(r"KWIN_CURSOR_POS_(?P<marker>[0-9a-f]{8}):(?P<x>-?\d+),(?P<y>-?\d+)")
-
-
-def _damped_step(delta: int, frac: float = 0.3, max_step: int = 250, min_step: int = 8) -> int:
-    """Used by click_at()'s homing loop -- see its comment for why a
-    straight proportional move isn't safe here."""
-    if delta == 0:
-        return 0
-    step = int(delta * frac)
-    if abs(step) < min_step:
-        step = min_step if delta > 0 else -min_step
-    if abs(step) > max_step:
-        step = max_step if delta > 0 else -max_step
-    if abs(step) > abs(delta):
-        step = delta
-    return step
-
-
-def _kwin_cursor_pos() -> tuple[int, int] | None:
-    """Reads the *real* cursor position straight from the compositor via a
-    throwaway KWin script (org.kde.kwin.Scripting -- runs inside KWin's own
-    process, so unlike ScreenShot2 it isn't gated behind the same
-    unprivileged-client authorization wall). `workspace.cursorPos` is
-    read-only in this KWin scripting API (confirmed live: writing to it
-    raises 'Cannot assign to read-only property'), so this can't warp the
-    cursor directly -- it's only used as ground truth for click_at()'s
-    homing loop below. Returns None if anything about this fails (no
-    busctl, KWin not running, script errored) so callers can fall back."""
-    if not _has("busctl"):
-        return None
-    marker = os.urandom(4).hex()
-    script = f'print("KWIN_CURSOR_POS_{marker}:" + workspace.cursorPos.x + "," + workspace.cursorPos.y);'
-    path = None
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
-            f.write(script)
-            path = f.name
-
-        out = subprocess.check_output(
-            ["busctl", "--user", "call", "org.kde.KWin", "/Scripting",
-             "org.kde.kwin.Scripting", "loadScript", "s", path],
-            text=True, stderr=subprocess.DEVNULL, timeout=5,
-        )
-        script_id = out.split()[1]
-        subprocess.run(
-            ["busctl", "--user", "call", "org.kde.KWin", f"/Scripting/Script{script_id}",
-             "org.kde.kwin.Script", "run"],
-            capture_output=True, timeout=5,
-        )
-        subprocess.run(
-            ["busctl", "--user", "call", "org.kde.KWin", "/Scripting",
-             "org.kde.kwin.Scripting", "unloadScript", "s", path],
-            capture_output=True, timeout=5,
-        )
-
-        journal = subprocess.check_output(
-            ["journalctl", "--user", "_COMM=kwin_wayland", "--since=-3s", "--no-pager"],
-            text=True, stderr=subprocess.DEVNULL, timeout=5,
-        )
-        for line in reversed(journal.splitlines()):
-            m = _KWIN_CURSOR_POS_RE.search(line)
-            if m and m.group("marker") == marker:
-                return int(m.group("x")), int(m.group("y"))
-        return None
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
-            IndexError, ValueError):
-        return None
-    finally:
-        if path:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+    return _input_backend().press_key(combo)
 
 
 def click_at(x: int, y: int) -> dict:
-    """Clicks at real screen pixel coordinates (x, y).
+    """Clicks at real screen pixel coordinates (x, y)."""
+    return _input_backend().click_at(x, y)
 
-    On Wayland, `ydotool mousemove --absolute` does NOT map to real screen
-    pixels -- confirmed by inspecting the ydotoold virtual device directly
-    via python-evdev: it only advertises EV_KEY and EV_REL capabilities, no
-    EV_ABS axis exists at all, so "--absolute" is really ydotool
-    internally tracking its own assumed position and converting to a
-    relative move from *that* guess, with no way to ever resync against
-    where the real compositor cursor actually is (see CLAUDE.md known
-    issues for the full writeup).
-
-    On KDE/KWin, this uses a proper closed-loop fix instead: read the
-    REAL cursor position via a KWin script (_kwin_cursor_pos(), runs
-    inside KWin's own process so it's authoritative), send a relative
-    ydotool move for the remaining delta (EV_REL is genuinely supported),
-    re-measure, and repeat until within a couple pixels of the target or a
-    small iteration cap is hit -- self-correcting regardless of any
-    pointer-acceleration curve distorting the exact relationship between a
-    commanded relative delta and the actual resulting movement (confirmed
-    live: a single relative move of (100, 100) actually landed at
-    (107, 107), i.e. not 1:1 -- the homing loop absorbs that instead of
-    needing an exact acceleration model). Falls back to the old
-    best-effort single absolute move if KWin's cursor-position readback
-    isn't available (non-KDE Wayland compositor, or busctl/journalctl
-    unavailable)."""
-    session = _session_type()
-    try:
-        if session == "wayland" and _has("ydotool"):
-            homed = False
-            last_pos = None
-            got_readback = False
-            for _ in range(35):
-                pos = _kwin_cursor_pos()
-                if pos is None:
-                    break
-                got_readback = True
-                last_pos = pos
-                cx, cy = pos
-                dx, dy = x - cx, y - cy
-                if abs(dx) <= 4 and abs(dy) <= 4:
-                    homed = True
-                    break
-                # Damped, capped step -- NOT a straight proportional (dx, dy)
-                # move. Confirmed live that ydotool's relative-move "gain"
-                # (actual pixels moved per requested pixel) is inconsistent
-                # and sometimes close to 2x, not a clean 1:1 or fixed
-                # multiplier -- a naive proportional correction overshoots
-                # past the target and oscillates back and forth forever
-                # instead of converging (reproduced live: bounced between
-                # opposite sides of a 2000px target for 8 straight
-                # iterations without narrowing). Capping each step to at
-                # most 30% of the remaining distance (and at most 250px
-                # outright) keeps the loop convergent even under an unknown
-                # per-step gain up to ~2x.
-                step_x = _damped_step(dx)
-                step_y = _damped_step(dy)
-                subprocess.run(["ydotool", "mousemove", "--", str(step_x), str(step_y)], check=True)
-                time.sleep(0.08)
-            if not homed:
-                if got_readback and last_pos is not None:
-                    # Didn't converge within the iteration cap, but we do
-                    # have a real, verified position from the compositor --
-                    # click there rather than discarding that progress for
-                    # a blind absolute jump (see below).
-                    log.warning("click_at homing didn't fully converge (ended near %s, target %s) -- clicking there anyway.",
-                                last_pos, (x, y))
-                else:
-                    # No working KWin readback at all (non-KDE compositor,
-                    # or busctl/journalctl unavailable) -- fall back to the
-                    # old best-effort absolute move. Known to not reliably
-                    # map to real pixels (see docstring), but it's the only
-                    # option left.
-                    subprocess.run(["ydotool", "mousemove", "--absolute", "-x", str(x), "-y", str(y)], check=True)
-            subprocess.run(["ydotool", "click", "0xC0"], check=True)  # left click
-        elif _has("xdotool"):
-            subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1"], check=True)
-        else:
-            return {"ok": False, "error": "Neither xdotool nor ydotool is available."}
-        return {"ok": True}
-    except subprocess.CalledProcessError as exc:
-        return {"ok": False, "error": str(exc)}
 
 
 def find_text_on_screen(text: str) -> dict:
