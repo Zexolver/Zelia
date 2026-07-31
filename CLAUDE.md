@@ -950,6 +950,47 @@ first rather than assuming the existing code is still correct.
    Wayland compositor, or `busctl`/`journalctl` missing) -- on GNOME or
    non-KWin wlroots compositors this bug is therefore still present, same
    caveat as issue 18's window-focus fix.
+22. ~~Responses were taking ~24s+ even for trivial questions~~ — found
+   while making the mobile app feel responsive (user: "might need to use
+   a slightly smaller model... or somehow have it load and respond
+   faster"). Three separate, stacking causes, not one:
+   1. `small_brain.py` never set Ollama's `keep_alive`, so it fell back
+      to Ollama's own 5-minute default and unloaded between sporadic
+      messages — confirmed live via `ollama ps`: ~6.2s cold reload vs
+      ~0.36s warm. Fixed with `keep_alive=-1`.
+   2. Far bigger: `agent_loop.py` interpolated per-request "Relevant
+      memories" text directly into the system message, which by
+      definition differs on every request (different memories recalled
+      for different questions). That content came *before* the
+      ~1900-token `TOOL_SCHEMAS` payload in the serialized prompt, so any
+      difference there invalidated Ollama's prompt-prefix cache for
+      everything after it — confirmed live: every single request was
+      paying the full ~17-18s cold-prefill cost for tool schemas, not
+      just the first one ever. Moved the memories text into the user
+      message instead (after everything that needs to stay cacheable);
+      confirmed fixed: repeated calls with a stable system+tools prefix
+      dropped to ~1.2s each.
+   3. `on_text`'s `respond()` called `safe_speak()` *synchronously*
+      before returning, so the socket connection — and by extension
+      `remote_bridge.py`'s relay to the mobile app — didn't close until
+      local TTS audio finished playing out loud, even though a phone
+      user never hears that audio at all. Now speaks in a background
+      thread for text-originated requests specifically; `on_wake`
+      (voice) is untouched on purpose, since blocking through TTS there
+      actually is correct (a wake word shouldn't talk over the current
+      answer while the user's standing right there). Trade-off accepted:
+      the activation lock now releases before speech finishes on the
+      text path, so a near-simultaneous wake-word activation could in
+      principle start while a text reply is still being spoken aloud —
+      narrow edge case, judged acceptable given how much this mattered
+      for remote/mobile responsiveness.
+   Confirmed end-to-end via the real `zelia.sock` protocol: three
+   consecutive requests measured 3.66s/3.36s/3.33s after all three
+   fixes, down from a cold ~24s before any of them. Worth remembering if
+   response speed regresses again later: check `ollama ps`'s UNTIL
+   column first (should say "Forever"), then whether anything
+   reintroduced per-request-varying content into the system message
+   ahead of the tool schemas.
 
 Still open:
 
