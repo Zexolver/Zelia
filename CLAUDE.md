@@ -514,6 +514,80 @@ ZELIA running — when the script exits. Still works, still useful for
 development, but **not the primary install path any more** — see
 "Packaging & releases" below.
 
+**Remote bridge + mobile app** (`src/remote_bridge.py`, separate repo
+`github.com:Zexolver/Zelia-Android`): explicit user requirement — talk to
+ZELIA from a phone, from anywhere, not just standing at the machine
+(motivating case: wants this working over a weekend away from the
+computer, including when Claude Code session limits are hit).
+- `remote_bridge.py` is a small stdlib-only HTTP server (`http.server`, no
+  new dependency) exposing `POST /chat` and `GET /health`. It is
+  deliberately just another *client* of the existing `zelia.sock` text
+  protocol (same one `text_repl.py`/`text_gui.py` use) — every request
+  opens a fresh connection, relays the message in, and returns whatever
+  line(s) come back before the connection closes. Not a new entry point
+  into the agent, so it inherits all the same behavior/limitations text
+  clients already have (e.g. a large-brain job's real answer is spoken
+  aloud, not delivered over a since-closed HTTP response).
+- Off by default (`config.yaml`'s `remote_bridge.enabled: false`) —
+  turning it on with no token configured would mean anything that can
+  reach the port gets full agent control with zero auth. Requires a
+  bearer token (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`)
+  once enabled. Binds to all interfaces rather than a specific one, for
+  simplicity — the *network* it's reachable on (see below) plus the token
+  are the actual access control, not the bind address.
+- Remote access is via **Tailscale** (a free WireGuard-based mesh VPN),
+  not port-forwarding/exposing anything to the raw internet. Installed on
+  this machine via `pacman -S tailscale` + `systemctl enable --now
+  tailscaled`; the login step (`sudo tailscale up`, opens a one-time
+  browser auth URL) had to be done by the user directly — device
+  authorization is inherently a personal-account action, not something
+  automatable. User also installed Tailscale on their phone, logged into
+  the same account. Once both are connected, the phone reaches ZELIA's
+  machine at its stable `100.x.y.z` tailnet address from anywhere the
+  phone has any network connection at all — confirmed live end-to-end:
+  `curl` against the bridge from a shell using the actual tailnet IP
+  (not `127.0.0.1`) got a real reply back.
+  User's stated preference: would have preferred netbird.io (already had
+  an account, thinks its free tier is better) but was in a rush and said
+  Tailscale was fine for now — worth considering switching if raised
+  again later, not treated as settled forever.
+- Text-only for now, matching the mobile app's v1 scope — voice
+  (recording on the phone, getting spoken replies back) was explicitly
+  deferred by the user as a later, lower-priority addition.
+- The Android app (Flutter/Dart, Material 3 with dynamic color via the
+  `dynamic_color` package, falls back to a fixed purple seed on
+  pre-Android-12 devices) lives in its own repo, not this one — user's
+  explicit choice, and explicitly **not** a Play Store app: sideloaded via
+  [Obtainium](https://github.com/ImranR98/Obtainium) instead, which tracks
+  a GitHub repo's Releases page for APK assets. `.github/workflows/release.yml`
+  builds and attaches a release APK automatically on any `vX.Y.Z` tag push
+  (debug-signed — fine for personal sideloading, would need a real
+  signing key if this were ever distributed beyond that). Getting this
+  working took three attempts, each a genuine separate bug, not flakiness:
+  (1) `flutter pub get` failed in CI because the action's `channel:
+  "stable"` didn't match the exact Flutter version (3.44.8, via `fvm`)
+  the app was built/tested against locally — fixed by pinning
+  `flutter-version` explicitly; (2) the release-creation step then failed
+  because the default `GITHUB_TOKEN` GitHub Actions provides is
+  read-only unless a workflow explicitly requests otherwise — fixed by
+  adding `permissions: contents: write` at the workflow level.
+- Explicitly deferred to later, low priority (user's own words: "making
+  that actually work is very low priority"): registering the app as an
+  Android digital-assistant app (the `VoiceInteractionService`/Assist API
+  role that lets an app be set as the phone's default assistant, an
+  alternative to "Hey Google"/Bixby). Noted here so a future session
+  doesn't have to rediscover this was discussed and intentionally
+  shelved, not forgotten.
+- The Android SDK at `~/Android/Sdk` is a **shared resource** — this
+  session found it mid-use by a separate, unrelated Claude Code session
+  on the same machine (an Android emulator was already running, recent
+  file timestamps for SDK components neither this session nor ZELIA
+  installed). Adding the missing `platforms;android-36` and
+  `build-tools;28.0.3` packages via `sdkmanager` was additive and did not
+  appear to disrupt whatever the other session was doing, but this is
+  worth remembering before doing anything destructive/version-downgrading
+  to that SDK in a future session.
+
 ## Packaging & releases
 
 Explicit user requirement: every release, both stable and
