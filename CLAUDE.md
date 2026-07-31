@@ -571,6 +571,21 @@ computer, including when Claude Code session limits are hit).
   because the default `GITHUB_TOKEN` GitHub Actions provides is
   read-only unless a workflow explicitly requests otherwise — fixed by
   adding `permissions: contents: write` at the workflow level.
+- **Auto-detects ZELIA's address** (user request: didn't want to type a
+  Tailscale IP by hand): Tailscale doesn't support broadcast-style LAN
+  discovery at all (peers are point-to-point WireGuard tunnels, not a
+  shared network segment a device can scan or broadcast on), so a
+  generic "find it on the network" scan was never viable — but MagicDNS
+  (confirmed enabled via `tailscale status --json`) gives the machine a
+  stable hostname (`zexolver-gaming-manjaro.tailc35f4b.ts.net`)
+  regardless of its actual tailnet IP. `SettingsService.defaultServerUrl`
+  hardcodes this (safe to bundle in the public app repo — it's just a
+  hostname, not a secret; reaching it still requires tailnet
+  membership), and the settings screen probes it automatically on first
+  launch before falling back to asking the user to type an address. The
+  token still can't be auto-filled the same way — it's a genuine
+  per-install secret, so baking it into a public repo's source would
+  leak it to anyone who clones the app.
 - Explicitly deferred to later, low priority (user's own words: "making
   that actually work is very low priority"): registering the app as an
   Android digital-assistant app (the `VoiceInteractionService`/Assist API
