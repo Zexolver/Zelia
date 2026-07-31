@@ -609,9 +609,29 @@ Still open:
      paths — this reduced but did not eliminate the behavior).
    - It sometimes emits what looks like a tool call (e.g.
      `run_shell_quiet {"command": "..."}`) as plain text *content*
-     instead of a proper structured `tool_calls` response, so
-     `agent_loop.py`'s `if not tool_calls:` branch treats it as the final
-     answer and speaks/sends the raw pseudo-call syntax verbatim.
+     instead of a proper structured `tool_calls` response. ~~Originally
+     `agent_loop.py`'s `if not tool_calls:` branch just treated this as
+     the final answer and spoke/sent the raw pseudo-call syntax
+     verbatim~~ -- **fixed** after a third occurrence actually broke a
+     real task (a web-research-then-code test: the model correctly wrote
+     working password-generator code in its reply text, described
+     writing it to `password_gen.py` and running it, but the described
+     action was never really executed -- the file on disk still had
+     garbage from an earlier failed attempt). `_find_leaked_tool_calls()`
+     (regex over the known `TOOL_SCHEMAS` names) now detects this shape
+     in the "no tool_calls" branch and actually dispatches the parsed
+     call for real instead of just displaying it, reporting a clean
+     plain-language outcome ("done" / "failed (...)")  instead of the
+     confusing raw syntax. Verified live: re-ran the exact failing
+     scenario, confirmed the file now has correct content and the script
+     actually runs. Doing this surfaced a second, related bug in the same
+     test: the model had been using `echo`-into-a-file shell tricks for
+     multi-line content, which silently produces literal backslash-n
+     characters instead of real newlines (`echo` without `-e` doesn't
+     interpret `\n`) -- added an explicit system-prompt rule to always
+     use `write_file` for creating/writing file content instead, also
+     confirmed fixed on retest (a real `word_count.py`, correctly
+     formatted, that actually ran).
    This is model/prompt-following unreliability, not a code defect in the
    dispatch path — the tool-crash-safety fix (see resolved issue notes
    above) and cwd-scoping fix are both confirmed working correctly when

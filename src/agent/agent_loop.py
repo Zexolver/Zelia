@@ -4,6 +4,7 @@ right brain, runs the tool-calling loop, handles "are you sure?" confirmations
 out loud, and hands the final answer back to be spoken + remembered.
 """
 import json
+import re
 
 from src.agent.tools.shell_tool import run_shell, is_destructive
 from src.agent.tools.file_tool import FileTool
@@ -251,6 +252,32 @@ TOOL_SCHEMAS = [
 
 MAX_TOOL_ROUNDS = 10
 
+_LEAKED_CALL_RE = re.compile(
+    r'\b(' + "|".join(re.escape(t["function"]["name"]) for t in TOOL_SCHEMAS) + r')\s*(\{.*?\})',
+    re.DOTALL,
+)
+
+
+def _find_leaked_tool_calls(content: str) -> list[tuple[str, dict]]:
+    """Small-model replies sometimes contain what looks like a tool call as
+    plain text instead of a real structured tool_calls response (e.g.
+    `run_in_terminal {"command": "..."}` appearing in .content) -- found
+    repeatedly in live testing, including one case where the leaked call
+    was the ONLY record of an action the model described taking, so the
+    actual file write never happened even though the reply confidently
+    said it did. Extracts any of these so the caller can actually execute
+    them instead of just displaying/speaking the raw syntax as if it were
+    the final answer."""
+    found = []
+    for match in _LEAKED_CALL_RE.finditer(content):
+        name, raw_args = match.group(1), match.group(2)
+        try:
+            args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            continue
+        found.append((name, args))
+    return found
+
 
 SCREEN_VISIBILITY_TOOLS = {"read_screen_text", "describe_screen", "find_text_on_screen", "click_at"}
 
@@ -403,6 +430,11 @@ class AgentLoop:
                     "inside your workspace directory -- use relative paths like `hello.py`, "
                     "never guess an absolute path like `~/workspace/hello.py` (that's the "
                     "user's actual home directory, not your workspace, and won't exist).\n"
+                    "- To create or write a file's contents (a script, code, config, etc.), "
+                    "always use write_file -- never shell tricks like echo/printf piped into "
+                    "a file. echo doesn't interpret \\n as a real newline without -e, so "
+                    "multi-line content written that way comes out broken (literal backslash-n "
+                    "characters instead of line breaks). write_file has no such problem.\n"
                     "- For anything web-related, use open_browser (a real visible browser "
                     "window, default is Floorp) rather than just fetching text, unless the "
                     "user only asked you to look something up for yourself. Use "
@@ -432,7 +464,25 @@ class AgentLoop:
             message = self.small_brain.chat(messages, tools=TOOL_SCHEMAS)
             tool_calls = message.get("tool_calls")
             if not tool_calls:
-                reply = message.get("content", "").strip()
+                content = message.get("content", "").strip()
+                leaked = _find_leaked_tool_calls(content)
+                if leaked:
+                    log.warning(
+                        "Recovering %d leaked tool call(s) from reply text instead of executing them: %s",
+                        len(leaked), [name for name, _ in leaked],
+                    )
+                    outcomes = []
+                    for name, args in leaked:
+                        try:
+                            result = self._dispatch_tool(name, args)
+                        except Exception as exc:  # noqa: BLE001
+                            log.error("Recovered leaked tool call %s failed: %s", name, exc)
+                            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                        outcomes.append("done" if result.get("ok") else f"failed ({result.get('error', 'unknown error')})")
+                    prefix = content.split(leaked[0][0], 1)[0].strip()
+                    reply = (prefix + " " if prefix else "") + "; ".join(outcomes)
+                else:
+                    reply = content
                 self.second_brain.remember(reply, role="assistant")
                 speak(reply)
                 return
