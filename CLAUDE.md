@@ -582,10 +582,55 @@ computer, including when Claude Code session limits are hit).
   hardcodes this (safe to bundle in the public app repo — it's just a
   hostname, not a secret; reaching it still requires tailnet
   membership), and the settings screen probes it automatically on first
-  launch before falling back to asking the user to type an address. The
-  token still can't be auto-filled the same way — it's a genuine
-  per-install secret, so baking it into a public repo's source would
-  leak it to anyone who clones the app.
+  launch before falling back to asking the user to type an address.
+  The token was a harder call — baking a real per-install secret into a
+  public repo's source is a genuine, standing security cost (anyone can
+  read it from the repo/its history, forever, even if later reverted),
+  not something to just quietly do. Flagged this tradeoff explicitly
+  before touching it; **user made an informed, explicit, and
+  time-bounded exception**: "for zelia, at least while I am away for the
+  weekend, it is fine to put the key in the app" — so
+  `SettingsService.bundledToken` now does exactly that, and
+  `tryAutoConfigure()` uses it (plus the MagicDNS address above) to skip
+  the Settings screen entirely on first launch when the default address
+  is reachable. This is documented in the app source as temporary and
+  should be rotated (new token generated, `config.yaml` updated, this
+  constant removed or replaced with a real pairing flow) once convenience
+  is no longer the constraint — don't treat this as a settled precedent
+  for baking future secrets into the app without asking again.
+- **Release APK signing was broken the same way twice, for two different
+  reasons** — found while fixing the "had to uninstall to update"
+  complaint:
+  1. Every CI run is a fresh machine with no persisted debug keystore, so
+     debug-signed releases (the default) each got a different random
+     signing key — Android refuses to install an "update" whose signature
+     doesn't match what's already on the device, forcing an uninstall
+     every time. Fixed with a real, persistent release keystore
+     (generated via `keytool`, stored **outside any repo** at
+     `~/.android-keys/` on the ZELIA machine — see that directory's
+     README.md and [[zelia_android_signing_key]] memory for the exact
+     values) fed to CI via repository secrets
+     (`RELEASE_KEYSTORE_BASE64`/`_PASSWORD`, `RELEASE_KEY_ALIAS`,
+     `RELEASE_KEY_PASSWORD`), with `build.gradle.kts` falling back to
+     debug signing if `android/key.properties` (gitignored) isn't present
+     locally.
+  2. Wiring that up then broke the workflow file *itself*: a step's
+     `if: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' }}` made GitHub
+     reject the whole file ("Unrecognized named-value: 'secrets'") —
+     the `secrets` context apparently can't be referenced directly in a
+     step's `if:`, only inside `env:`/`with:`. This is a real, sharp edge
+     worth remembering for any future workflow change here: do
+     conditional-on-a-secret checks in the run script's shell (using an
+     env var sourced from the secret), never in `if:` directly. Confirmed
+     via the run's actual annotation text (fetched from the run's HTML
+     page — the Actions REST API didn't surface it, `check-runs` came
+     back empty since the file couldn't even be parsed into a check).
+     Side effect worth knowing: an invalid workflow file gets evaluated
+     (and shows up as a failed run) on **every** push while it's broken,
+     regardless of the `on:` filters — two ordinary pushes to `main`
+     showed up as failed "Release APK" runs before this was diagnosed,
+     which was initially confusing since the trigger config only lists
+     tag pushes.
 - Explicitly deferred to later, low priority (user's own words: "making
   that actually work is very low priority"): registering the app as an
   Android digital-assistant app (the `VoiceInteractionService`/Assist API
