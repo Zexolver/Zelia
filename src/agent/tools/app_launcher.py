@@ -18,6 +18,13 @@ DESKTOP_DIRS = [
     "/usr/share/applications",
     "/usr/local/share/applications",
     os.path.expanduser("~/.local/share/applications"),
+    # Flatpak apps' .desktop files live here, not in the dirs above --
+    # found via a real bug: Brave (Flatpak-only on this machine, no direct
+    # PATH executable at all) was invisible to show_me/open_browser
+    # entirely until this was added, not just the launch-mechanism issue
+    # fixed alongside this in browser_control.py.
+    "/var/lib/flatpak/exports/share/applications",
+    os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
 ]
 
 

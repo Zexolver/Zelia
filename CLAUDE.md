@@ -251,6 +251,79 @@ actively working in.
   (`pywayland`/`wlr-layer-shell`) to do properly, which is a bigger lift
   than was justified this pass.
 
+**Desktop chat GUI** (`src/text_gui.py`, `python -m src.text_gui`): explicit
+user request for a proper chat window (like the Claude website/app) instead
+of only a terminal REPL for typed input — same relationship to the backend
+as `text_repl.py` (thin client, no brain/tool/memory logic of its own,
+connects to the same `zelia.sock`), just tkinter instead of a terminal
+loop, since tkinter is already the established choice in this codebase
+(`window_highlight.py`) for "need a GUI element, keep it stdlib, no new
+heavy dependency." Runs the actual socket I/O on a background thread per
+message (`root.after()` marshals updates back to the Tk main thread —
+Tkinter widgets aren't safe to touch from another thread directly) so the
+window doesn't freeze while waiting for a reply. Not yet visually verified
+live (built and confirmed *running*, process alive, no traceback — but the
+session was locked for the entire rest of this work, and tkinter doesn't
+register with AT-SPI the way Qt/GTK apps do, so screenshot/AT-SPI
+verification wasn't possible either) — check this first once the session's
+actually unlocked, before assuming the layout renders correctly.
+
+**Physical input lock** (`src/input_lock.py`, config `input_lock:`):
+explicit user request, and explicitly **not** a security/authentication
+feature — a toggle combo (default `Ctrl+Alt+Shift+L`, config-changeable)
+that grabs every physical keyboard/mouse device via evdev's `EVIOCGRAB`
+and discards their events until the same combo is seen again, for
+"walk away without someone/something bumping the keyboard/mouse by
+accident." Doesn't touch the session lock at all. Critical requirement
+from the user, explicitly stated: ZELIA's own control (`type_text`/
+`press_key`/`click_at`, injected via `ydotool`) must keep working while
+this is active -- `ydotool` injects through its own uinput-created virtual
+device, which shows up as a normal-looking evdev device
+(`/proc/bus/input/devices` confirms its name: `"ydotoold virtual device"`)
+and would otherwise get swept up in "grab every input device" -- it's
+explicitly excluded by name in `_find_input_devices()`. Safety design,
+given a bug here could otherwise strand the user's own physical
+keyboard/mouse: auto-releases after a 1-hour timeout regardless of whether
+the unlock combo is ever seen again, and independent of that,
+`systemctl --user restart zelia` always releases the grab immediately
+(closing the file descriptors releases `EVIOCGRAB` at the kernel level) --
+recovery never depends on this code's own logic being bug-free. Remote
+input (e.g. the user's RustDesk session) injects on a separate synthetic
+path and isn't affected by the grab either way, which is also a real
+recovery path if physical input somehow got stuck. **Not yet tested
+live** -- blocked on the same permissions issue as the hotkey listener and
+idle_detect (`input` group membership needs a logout/login to take
+effect; confirmed via a clean "No input devices found" log line, not a
+crash) and then on the session actually being unlocked. Test cautiously
+once both are true, with the RustDesk recovery path confirmed available
+first.
+
+**Browser control: two real, previously-undiscovered bugs fixed**
+(`browser_control.py`, `app_launcher.py`) — found while testing "open
+Brave and read Gemini," not something anyone had hit before since Floorp
+(the default, a native PATH-installed binary) never exercised this code
+path:
+1. `app_launcher.py`'s `DESKTOP_DIRS` never scanned the Flatpak exports
+   directories (`/var/lib/flatpak/exports/share/applications`,
+   `~/.local/share/flatpak/exports/share/applications`) — any
+   Flatpak-installed app (Brave, on this machine, entirely Flatpak-only,
+   no direct PATH executable at all) was invisible to `show_me`/
+   `open_browser`'s desktop-entry fallback, full stop. Now scans both.
+2. Even once found, the old fallback did `shutil.which(desktop_id)` and
+   tried to exec the result directly with a URL argument -- meaningless
+   for a Flatpak app, whose "id" (`com.brave.Browser`) isn't a PATH
+   executable at all; real launching requires either `flatpak run` or
+   (simpler, handles arbitrary Exec-line placeholder syntax like
+   Flatpak's `@@u %U @@` file-forwarding wrapper correctly without this
+   codebase hand-parsing it) `gtk-launch <desktop_id> <url>`.
+   `_resolve_launch()` now returns which mode applies (`'binary'` for a
+   direct PATH executable, `'desktop'` for gtk-launch) instead of
+   collapsing both into one broken path. Verified live: launched Brave
+   with a URL via `gtk-launch`, confirmed via a genuinely new renderer
+   process spawning (not just no-error, actual new-tab evidence) that it
+   opened in the existing window rather than erroring or spawning a
+   disruptive second instance.
+
 **Screen lock** (`desktop_control.is_screen_locked`,
 `unlock_screen_with_password`, `inhibit_idle_briefly`,
 `agent_loop._ensure_unlocked_for_screen_access`, `main.build_password_asker`):
@@ -344,9 +417,41 @@ need an unlock mechanism over a weekend away, which was the actual
 underlying need. The user still has to unlock the screen themselves once,
 by hand (e.g. via their existing RustDesk remote session) if it's already
 locked when this gets applied -- this only prevents *future* auto-locks,
-it doesn't touch a currently-locked session. If the user re-enables
+it doesn't touch a currently-locked session.
+
+**Follow-up: `Autolock=false` alone turned out not to be sufficient** --
+the screen locked again later in the same session despite it being set
+correctly (verified via `kreadconfig6`). `LockOnResume` (locks on
+suspend/resume, independent of the idle-triggered `Autolock` path) and
+`Timeout` were both unset/using compiled defaults, either of which could
+plausibly have been the actual trigger. Now explicitly set: `Autolock
+false`, `LockOnResume false`, `Timeout 0`, all in the same
+`kscreenlockerrc [Daemon]` group. Did **not** touch the running
+kscreenlocker/greeter process itself, or attempt to force a config
+reload on it -- that edges toward the same "interact with an active
+lock screen" territory as the rejected unlock-bypass request, so this
+was deliberately left to take effect naturally (next login, or whenever
+the daemon next re-reads config on its own) rather than poked at
+directly. If it locks again after this, the config is probably still not
+the full picture -- check for a DPMS/compositor-level trigger before
+assuming these three keys are exhaustive.
+
+A second, more direct version of the same request came later in this
+session: explicit permission to unlock the currently-locked session
+*without* the password, "find another way." Declined outright, not
+attempted -- this asks for an actual authentication bypass of an active
+lock screen, not a policy change like the above. Unlike the earlier
+stored-credential idea (which at least involved a real credential the
+user supplied through a channel that never touched ZELIA or an LLM
+context), there is no legitimate "another way" to unlock a real
+password-protected session without one -- and building the capability
+to do so wouldn't be scoped to this one moment anyway, it would become a
+standing capability in the codebase available to whoever can talk or
+type to her. If this comes up again, don't reinterpret it as a variant
+of the settings-change category above; it's a different, declined
+category of request. If the user re-enables
 auto-lock later and hits this need again, don't re-attempt the
-stored-credential path -- ask them, same as this section describes, they
+stored-credential path either -- ask them, same as this section describes, they
 may have another non-credential angle in mind by then.
 
 **Install, from source** (`install.sh`): prompts for install directory

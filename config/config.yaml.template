@@ -51,6 +51,24 @@ hotkey:
   key: "KEY_SCROLLLOCK"   # rarely used for anything else; see README to pick a different one
 
 # ---------------------------------------------------------------------------
+# Physical input lock
+#
+# A toggle combo that grabs every physical keyboard/mouse device
+# (kernel-level, EVIOCGRAB) and silently discards their events until the
+# same combo is pressed again -- for walking away without anyone bumping
+# the keyboard/mouse and doing something by accident. NOT a security/
+# authentication feature: doesn't touch the screen lock, and ZELIA's own
+# synthetic input (ydotool, for type_text/press_key/click_at) is
+# explicitly excluded from the grab, so she keeps working normally while
+# this is active. If the combo doesn't seem to be free on your system,
+# change it here -- see /usr/include/linux/input-event-codes.h or
+# `sudo libinput debug-events` for KEY_* names, same as the hotkey above.
+# ---------------------------------------------------------------------------
+input_lock:
+  enabled: true
+  combo: ["KEY_LEFTCTRL", "KEY_LEFTALT", "KEY_LEFTSHIFT", "KEY_L"]
+
+# ---------------------------------------------------------------------------
 # Speech-to-text (Whisper via faster-whisper)
 # ---------------------------------------------------------------------------
 stt:

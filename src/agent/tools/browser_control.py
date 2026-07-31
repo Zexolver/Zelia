@@ -38,40 +38,49 @@ KNOWN_BINARIES = {
 _session_browser_override: str | None = None
 
 
-def _resolve_binary(name: str) -> str | None:
+def _resolve_launch(name: str) -> tuple[str, str] | None:
+    """Returns (mode, target). mode='binary' means target is a direct PATH
+    executable, launch as [target, url]. mode='desktop' means target is a
+    .desktop id, launch via `gtk-launch target url` instead -- needed for
+    Flatpak-installed browsers (e.g. Brave, confirmed to have no direct
+    PATH executable at all on this machine, only a .desktop entry whose
+    Exec line runs `flatpak run ... @@u %U @@`). gtk-launch reads the
+    desktop file itself and handles that placeholder/URL-passing syntax
+    correctly instead of us hand-parsing Exec lines."""
     name = name.lower().strip()
     for candidate in KNOWN_BINARIES.get(name, [name]):
         if shutil.which(candidate):
-            return candidate
-    # fall back to matching an installed .desktop entry's name
+            return "binary", candidate
     entries = _list_desktop_entries()
     for display_name, desktop_id in entries.items():
         if name in display_name.lower():
-            if shutil.which(desktop_id):
-                return desktop_id
+            return "desktop", desktop_id
     return None
 
 
 def open_browser(url: str, browser: str | None = None, default_browser: str = "floorp") -> dict:
     global _session_browser_override
     target = browser or _session_browser_override or default_browser
-    binary = _resolve_binary(target)
-    if not binary:
+    resolved = _resolve_launch(target)
+    if not resolved:
         return {"ok": False, "error": f"Couldn't find an installed browser matching '{target}'."}
+    mode, ident = resolved
 
     if not (url.startswith("http://") or url.startswith("https://")):
         url = f"https://{url}"
 
-    subprocess.Popen([binary, url])
-    log.info("Opened %s in %s", url, binary)
-    return {"ok": True, "browser": binary, "url": url}
+    if mode == "binary":
+        subprocess.Popen([ident, url])
+    else:
+        subprocess.Popen(["gtk-launch", ident, url])
+    log.info("Opened %s in %s (%s)", url, ident, mode)
+    return {"ok": True, "browser": ident, "url": url}
 
 
 def set_browser_for_now(browser: str) -> dict:
     """'use X browser for this' -- session-only, doesn't touch config.yaml."""
     global _session_browser_override
-    binary = _resolve_binary(browser)
-    if not binary:
+    if not _resolve_launch(browser):
         return {"ok": False, "error": f"Couldn't find an installed browser matching '{browser}'."}
     _session_browser_override = browser
     return {"ok": True, "browser": browser, "scope": "this session only"}
@@ -79,8 +88,7 @@ def set_browser_for_now(browser: str) -> dict:
 
 def set_default_browser(browser: str, config_path: str) -> dict:
     """'always use X from now on' -- persists to config.yaml."""
-    binary = _resolve_binary(browser)
-    if not binary:
+    if not _resolve_launch(browser):
         return {"ok": False, "error": f"Couldn't find an installed browser matching '{browser}'."}
 
     with open(config_path) as f:
