@@ -13,6 +13,7 @@ Wayland: no single protocol covers this across compositors, so:
     no standard way to do this from outside, so it's skipped there and we
     just rely on newly-launched windows already having focus.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -164,6 +165,45 @@ def find_text_on_screen(text: str) -> dict:
 # --------------------------------------------------------------------------
 # Window focus (best-effort on Wayland)
 # --------------------------------------------------------------------------
+def _focus_window_kwin(name: str) -> dict | None:
+    """KDE/KWin-specific focus, via the same D-Bus interface KRunner's
+    built-in "Windows" plugin uses (org.kde.krunner1 on /WindowsRunner --
+    Match to search by title/app, Run to activate). This is a real, working
+    mechanism unlike the generic wlrctl/swaymsg paths below, which don't
+    apply to KWin -- confirmed live: activated a specific Brave window by
+    title out of ~20 other open windows (many Konsole/Claude Code sessions)
+    on a KDE Plasma 6 Wayland session, verified via screenshot. Returns None
+    (not a dict) if org.kde.KWin isn't on the session bus at all, so callers
+    can fall through to other compositor paths; returns an {"ok": ...} dict
+    once it's established KWin is present, since a no-match at that point is
+    a real failure, not "wrong compositor"."""
+    if not _has("busctl"):
+        return None
+    try:
+        out = subprocess.check_output(
+            ["busctl", "--user", "--json=short", "call", "org.kde.KWin", "/WindowsRunner",
+             "org.kde.krunner1", "Match", "s", name],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None  # org.kde.KWin likely isn't on the bus -- not KWin, or KWin too old
+
+    try:
+        matches = json.loads(out)["data"][0]
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return {"ok": False, "error": "Unexpected response from KWin's window matcher."}
+    if not matches:
+        return {"ok": False, "error": f"No window matching '{name}' (via KWin)."}
+
+    match_id = matches[0][0]  # matches are pre-sorted by relevance
+    subprocess.run(
+        ["busctl", "--user", "call", "org.kde.KWin", "/WindowsRunner",
+         "org.kde.krunner1", "Run", "ss", match_id, ""],
+        capture_output=True, timeout=5,
+    )
+    return {"ok": True, "note": "focused via KWin's window matcher", "matched_title": matches[0][1]}
+
+
 def focus_window(name: str) -> dict:
     session = _session_type()
     if session != "wayland" and _has("wmctrl"):
@@ -176,6 +216,10 @@ def focus_window(name: str) -> dict:
         except subprocess.CalledProcessError:
             pass
         return {"ok": False, "error": f"No window matching '{name}'."}
+
+    kwin_result = _focus_window_kwin(name)
+    if kwin_result is not None:
+        return kwin_result
 
     if _has("swaymsg"):
         subprocess.run(["swaymsg", f'[title="{name}"] focus'], capture_output=True)

@@ -36,6 +36,19 @@ DEFAULT_PATTERNS = [
 
 GPU_HOG_THRESHOLD_PCT = 25  # a non-ZELIA process using >25% of one GPU counts as "gaming/heavy load"
 
+# Processes that are part of ZELIA's own stack but run outside her own PID
+# (own_pid only ever excludes ZELIA's own process). Ollama specifically:
+# once GPU acceleration was fixed (see CLAUDE.md known issues -- the small
+# brain now genuinely runs on the AMD GPU via Vulkan), every normal chat
+# turn shows up in `rocm-smi --showpids` under Ollama's own PID, which is
+# never ZELIA's own PID -- so without this exclusion, ZELIA's own routine
+# small-brain inference was misdetected as "someone else is gaming",
+# deprioritizing her and blocking her own AirLLM queue on every request.
+# Confirmed live: "Gaming state changed -> GAMING" fired right after a
+# normal tool-calling turn that involved an Ollama chat completion, with no
+# game or heavy external GPU load actually running.
+OWN_BACKEND_PROCESS_NAMES = {"ollama", "ollama_llama_server"}
+
 
 class GameGuard:
     def __init__(self, extra_patterns=None, poll_interval_seconds: float = 5.0, own_pid: int | None = None):
@@ -57,17 +70,27 @@ class GameGuard:
                     return True
         return False
 
+    def _is_foreign_gpu_pid(self, pid: int) -> bool:
+        if pid == self._own_pid:
+            return False
+        try:
+            if psutil.Process(pid).name() in OWN_BACKEND_PROCESS_NAMES:
+                return False
+        except psutil.NoSuchProcess:
+            pass
+        return True
+
     def _gpu_hog_match(self) -> bool:
         # Try NVIDIA first, then AMD (rocm-smi is often not installed unless
         # the full ROCm stack is set up -- that's fine, this signal is a
         # bonus on top of process-pattern matching, not the only one).
         pid = self._nvidia_compute_pid()
         if pid is not None:
-            return pid != self._own_pid
+            return self._is_foreign_gpu_pid(pid)
 
         pid = self._amd_compute_pid()
         if pid is not None:
-            return pid != self._own_pid
+            return self._is_foreign_gpu_pid(pid)
 
         return False
 

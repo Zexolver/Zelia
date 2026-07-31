@@ -707,13 +707,104 @@ first rather than assuming the existing code is still correct.
    Related to issue (2) below and to the user's separately-stated,
    still-open priority: TTS reading raw content verbatim instead of
    translating it into natural spoken language.
+18. ~~Window focus had no implementation on KDE/GNOME Wayland~~ (was issue
+   5b) — found while live-testing multi-tab browser reading: on a busy
+   desktop (~20 windows, mostly Konsole/Claude Code sessions), a
+   just-launched Brave window never actually got compositor focus, so
+   `read_all_tabs`'s Ctrl+Tab cycling read an unrelated terminal's
+   scrollback instead of any browser tab. The generic Wayland answer really
+   is "no standard API for this" -- but KWin specifically exposes one
+   anyway: `org.kde.krunner1` on `org.kde.KWin /WindowsRunner` (the same
+   D-Bus interface KRunner's built-in "Windows" plugin uses to alt-tab by
+   title) supports `Match(query) -> matches` then `Run(matchId, "")` to
+   activate. `desktop_control.focus_window()` now tries this first on any
+   Wayland session before falling through to the existing wlrctl/swaymsg
+   paths (which remain for non-KWin wlroots compositors). Confirmed live:
+   activated a specific Brave window out of ~20 other open windows by
+   title, verified via screenshot; re-ran the same tab-reading test
+   afterward and it correctly read real tab content (a Wikipedia article)
+   instead of terminal scrollback. `read_all_browser_tabs`'s tool schema
+   now takes an optional `browser` hint and calls `focus_window()` itself
+   before cycling, rather than trusting the model to have called a
+   separate focus step first (see issue 11 -- that trust was misplaced in
+   the same live test, see issue 19). Still not implemented for GNOME
+   Wayland or non-KWin wlroots compositors without wlrctl/swaymsg -- only
+   fixed for this project's actual reference platform (KDE Plasma 6).
+19. ~~`router.classify()`'s ambiguous-case prompt let a multi-step
+   tool-use request get routed to the large brain~~ — found in the same
+   live browser-tab-reading test: a request to open three sites in a
+   browser and read all the tabs got classified "large" by the small
+   model's own judgment (not the keyword list, not the old length
+   heuristic -- confirmed via log, the message was 54 words and matched no
+   keyword). This is a real failure mode, not just a bad guess: the
+   large-brain branch (`agent_loop.py`) is a single raw text completion
+   with **zero tool access**, so anything routed there that needs to
+   actually touch the browser/filesystem/screen is guaranteed to fail
+   outright -- confirmed live, it tried to fulfill the request via AirLLM,
+   which can't open a browser at all (and separately hit the pre-existing
+   gated-model auth failure from issue 12, compounding the problem).
+   Rewrote the classification prompt to explicitly state that 'large' is
+   only for self-contained generation work needing no tools, and that
+   'small' must be used for anything requiring live system interaction
+   regardless of how substantial/multi-step it reads -- also removed the
+   old `> 60 words` length shortcut entirely, since length was never a
+   reliable proxy for "needs tools" (it was actually irrelevant to this
+   specific failure, but is exactly the kind of signal that would make the
+   same mistake on a different long-but-ordinary request). Confirmed fixed
+   by re-running the identical request after the prompt change: routed to
+   'small', tools were actually called.
+20. ~~`game_guard`'s GPU-hog detector misfired on ZELIA's own small-brain
+   inference~~ — found immediately after the issue 19 fix let a real
+   Ollama tool-calling turn actually run: `rocm-smi --showpids` reports
+   *any* process using the AMD GPU compute queue, and `_gpu_hog_match()`
+   only ever excluded ZELIA's own PID, not Ollama's (a separate systemd
+   service process). Before this session's Vulkan GPU-acceleration fix for
+   Ollama (issue 10), this was harmless -- Ollama ran CPU-only and never
+   showed up in `rocm-smi` at all. Once Ollama started actually using the
+   GPU, *every* normal small-brain chat turn made `game_guard` think an
+   external process was gaming, deprioritizing ZELIA's own process and
+   blocking her own AirLLM queue -- self-inflicted throttling on
+   completely routine activity. Confirmed live: `journalctl` showed
+   "Gaming state changed -> GAMING" firing right after an ordinary
+   tool-calling turn with nothing actually running. Added
+   `OWN_BACKEND_PROCESS_NAMES = {"ollama", "ollama_llama_server"}` and an
+   `_is_foreign_gpu_pid()` check that looks up the reported PID's process
+   name via `psutil` before counting it as "foreign" GPU usage. Confirmed
+   fixed: re-ran the same Ollama-backed request post-fix, no gaming-state
+   flip in the logs. Worth remembering if STT/TTS ever gain GPU
+   acceleration too (currently CPU-only per `config.yaml`) -- they'd need
+   the same exclusion.
 
 Still open:
 
+17. **`click_at` (`desktop_control.py`) is not just imprecise, it's
+   fundamentally unreliable** — found while testing the desktop chat GUI.
+   `ydotool mousemove --absolute -x -y` does *not* map to real screen
+   pixels: inspected the `ydotoold virtual device` directly via
+   `python-evdev` (`dev.capabilities()`), and it only advertises `EV_KEY`
+   and `EV_REL` — no `EV_ABS` axis exists on the device at all. So
+   "absolute" positioning is ydotool internally tracking its own assumed
+   cursor position and converting to a relative move from *that*, with no
+   way to ever resync against where the real compositor cursor actually
+   is. Confirmed live: fed it the exact on-screen pixel coordinates of a
+   dialog button (cross-checked via `wmctrl -l -G` and a pixel-measured
+   screenshot crop) and the click landed somewhere else entirely, twice.
+   `press_key` is unaffected (`EV_KEY` only, no coordinates involved) —
+   this only breaks tools that need to click a specific point:
+   `click_at` and, by extension, anything built on top of it. Not
+   attempted yet: likely fix is querying the compositor for true cursor
+   position before each absolute move (no obvious KWin/Wayland-portal API
+   for this was found during this session) or switching whatever backs
+   `click_at` to something that maintains a real `EV_ABS`-capable virtual
+   pointer. Also affects future work item #1 below (AT-SPI-driven
+   clicking would sidestep this for apps where AT-SPI is available at
+   all, but Chromium/CEF apps like Steam and Brave still have no AT-SPI
+   tree, so this remains a real gap for those).
 5. `press_key`'s Wayland path (`desktop_control.py`, `YDOTOOL_KEYS`) only
    has a handful of key combos mapped — extend as needed.
-5b. Window focus has no implementation on GNOME/KDE Wayland (no standard
-   API for it) — currently just skipped gracefully there.
+5b. Window focus still has no implementation on GNOME Wayland or non-KWin
+   wlroots compositors without wlrctl/swaymsg (see resolved issue 18 for
+   the KDE/KWin fix, which is this project's actual reference platform).
 14. **`start_priority_manager` (`main.py`) can't always restore normal
    priority after gaming ends** — logs a recurring `Could not renice`
    warning every poll cycle once this happens. Standard Linux permission

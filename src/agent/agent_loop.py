@@ -116,8 +116,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_all_browser_tabs",
-            "description": "Reads every open tab in whatever browser window is currently focused, by actually cycling through them with Ctrl+Tab and reading each one (stops automatically when it cycles back to the start). Use this specifically for 'what tabs do I have open', 'read all my tabs', or checking content across multiple open tabs -- for a single visible tab/page, use read_screen_text instead, it's faster. Make sure the browser is actually focused first (show_me/open_browser) before calling this.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "Reads every open tab in a browser window, by actually cycling through them with Ctrl+Tab and reading each one (stops automatically when it cycles back to the start). Use this specifically for 'what tabs do I have open', 'read all my tabs', or checking content across multiple open tabs -- for a single visible tab/page, use read_screen_text instead, it's faster. Pass 'browser' (e.g. 'brave', 'floorp') so it can focus the right window itself first -- don't rely on it already being focused.",
+            "parameters": {
+                "type": "object",
+                "properties": {"browser": {"type": "string", "description": "Which browser's window to focus first, e.g. 'brave' or 'floorp'."}},
+            },
         },
     },
     {
@@ -355,7 +358,7 @@ class AgentLoop:
         elif name == "read_screen_text":
             result = screen_tool.read_screen_text()
         elif name == "read_all_browser_tabs":
-            result = browser_tabs.read_all_tabs()
+            result = browser_tabs.read_all_tabs(browser=args.get("browser", ""))
         elif name == "describe_screen":
             result = screen_tool.describe_screen(args.get("question", ""), self.vision_model, self.ollama_host)
         elif name == "show_me":

@@ -22,9 +22,12 @@ def classify(user_text: str, small_brain) -> str:
     if any(hint in lowered for hint in BIG_PROJECT_HINTS):
         return "large"
 
-    # Cheap length heuristic: very long, multi-requirement asks are usually projects.
-    if len(user_text.split()) > 60:
-        return "large"
+    # No word-count heuristic here on purpose: the large-brain path has zero
+    # tool access (see agent_loop.py's "large" branch -- it's a single raw
+    # text completion, no browser/file/desktop tools at all), so length alone
+    # is a bad signal -- a long but ordinary multi-step tool-use request is
+    # exactly the kind of thing that reads as "substantial" by word count
+    # while still needing tools "large" doesn't have.
 
     # Ambiguous -- let the small brain make a quick call rather than guessing wrong.
     try:
@@ -32,10 +35,19 @@ def classify(user_text: str, small_brain) -> str:
             {
                 "role": "system",
                 "content": (
-                    "Reply with exactly one word: 'small' if this request is a quick "
-                    "question or simple command, or 'large' if it's a substantial "
-                    "project (e.g. building a full application) that deserves more "
-                    "time and a higher-quality model. No other text."
+                    "Reply with exactly one word: 'small' or 'large'.\n\n"
+                    "'large' is ONLY for self-contained generation work that needs no "
+                    "tools -- e.g. writing a substantial chunk of code or a document "
+                    "from scratch, in one shot, where nothing needs to be opened, "
+                    "clicked, browsed, or read from the live system first.\n\n"
+                    "'small' is for everything else, including multi-step requests, "
+                    "as long as any step needs to interact with the actual computer: "
+                    "opening or reading apps/websites/browser tabs, clicking, taking "
+                    "screenshots, reading or writing files, running commands. The "
+                    "large option has NO ability to do any of that -- if you pick "
+                    "'large' for a task that needs it, the task will simply fail. "
+                    "When genuinely unsure, prefer 'small'.\n\n"
+                    "No other text in your reply, just the one word."
                 ),
             },
             {"role": "user", "content": user_text},

@@ -9,12 +9,18 @@ tree at all (confirmed empty in atspi_tool.py's testing), so there's no
 "ask the app directly" shortcut the way there is for native Qt/GTK apps --
 screenshot+OCR of each tab in turn is the only way to actually see them.
 
-Assumes the browser is already the focused window (call show_me/
-open_browser first if it isn't) -- doesn't try to explicitly focus it
-itself, since xdotool-based window queries/activation aren't reliable for
-native-Wayland clients like Brave (confirmed: it runs with
---ozone-platform=wayland, not XWayland, so it's invisible to X11-rooted
-tools the way a Tk or XWayland-bridged window isn't).
+Takes an optional `browser` hint (e.g. "brave", "floorp") and focuses that
+window itself via desktop_control.focus_window() before cycling, rather
+than trusting the caller to have already focused it -- confirmed live this
+matters: on a desktop with ~20 other windows open (many terminals), relying
+on "whatever's already focused" once actually read Konsole scrollback
+instead of the browser, because nothing had brought the just-launched
+browser window to the front. desktop_control.focus_window() itself uses
+KWin's window matcher on KDE (see its docstring) -- xdotool-based
+activation still isn't reliable for native-Wayland clients like Brave
+(confirmed: it runs with --ozone-platform=wayland, not XWayland, so it's
+invisible to X11-rooted tools the way a Tk or XWayland-bridged window
+isn't), which is exactly the gap the KWin path closes.
 """
 import time
 
@@ -29,12 +35,20 @@ SNIPPET_LEN = 200  # how much of each tab's text to compare for "have we cycled 
 MAX_CHARS_PER_TAB = 1500  # keep 15 tabs' worth of OCR from swamping the small brain's context
 
 
-def read_all_tabs(max_tabs: int = MAX_TABS) -> dict:
+def read_all_tabs(max_tabs: int = MAX_TABS, browser: str = "") -> dict:
     """Cycles forward through tabs with Ctrl+Tab, reading each one, until
     it sees a tab whose content matches one already read (cycled back to
     the start) or hits max_tabs. Leaves the browser on whatever tab it
     ends up on -- Ctrl+Tab a few more times or Ctrl+1 for the first tab
     if you need to land somewhere specific afterward."""
+    if browser:
+        focus_result = desktop_control.focus_window(browser)
+        if not focus_result.get("ok"):
+            log.warning("Could not focus '%s' before reading tabs (%s) -- proceeding anyway.",
+                        browser, focus_result.get("error"))
+        else:
+            time.sleep(SETTLE_SECONDS)
+
     tabs = []
     seen_snippets = set()
 
