@@ -169,6 +169,23 @@ desktop:
                                  # or "always use <browser>" to change this permanently
 
 # ---------------------------------------------------------------------------
+# Remote bridge (mobile app / anything off-machine)
+#
+# A small HTTP server (src/remote_bridge.py) that relays to the same
+# zelia.sock text protocol text_repl.py/text_gui.py already use -- not a
+# new entry point into the agent, just another client of the existing one.
+# Off by default: turning this on with no token set would mean anything
+# that can reach this port gets full agent control with no auth at all.
+# Meant to be reached over a private network only (e.g. Tailscale) -- this
+# binds to all interfaces, so whatever network reaches this port (LAN,
+# Tailscale, etc.) combined with the token is the actual access control.
+# ---------------------------------------------------------------------------
+remote_bridge:
+  enabled: false
+  port: 8899
+  token: ""   # generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# ---------------------------------------------------------------------------
 # Agent / tools
 # ---------------------------------------------------------------------------
 agent:

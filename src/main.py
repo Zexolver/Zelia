@@ -15,7 +15,8 @@ from src.config import load_config
 from src.utils.logger import get_logger
 from src.wake_word import build_wake_word_listener
 from src.hotkey_listener import start_hotkey_listener
-from src.text_input import start_text_input_server
+from src.text_input import start_text_input_server, socket_path
+from src import remote_bridge
 from src import idle_detect
 from src import input_lock
 from src.stt import SpeechToText
@@ -178,6 +179,14 @@ def main():
 
     start_text_input_server(cfg.install_dir, on_text)
     log.info("Type to her any time with: python -m src.text_repl")
+
+    remote_cfg = cfg.get("remote_bridge", {})
+    if remote_cfg.get("enabled", False):
+        remote_bridge.start(
+            socket_path(cfg.install_dir),
+            remote_cfg.get("port", 8765),
+            remote_cfg.get("token", ""),
+        )
 
     try:
         listener = build_wake_word_listener(cfg)
