@@ -1,3 +1,5 @@
+Rules: Read files first. Write complete solution. Test once. No over-engineering. Don't fluff output text to save tokens.
+
 # ZELIA — Project Context
 
 This file is for Claude Code. It's the accumulated spec/history of a
