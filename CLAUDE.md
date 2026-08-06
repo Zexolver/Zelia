@@ -1602,6 +1602,164 @@ first rather than assuming the existing code is still correct.
    this session), and the very next ordinary request measured ~4s
    (warm-cache, prefix now genuinely stable across every real request
    instead of being evicted every time).
+33. **3pm test session (2026-08-06, user away from the machine as
+   planned) -- what got confirmed, what got fixed, and a clearer picture
+   of the one real remaining problem.**
+   - **Turbidle and the idle-task queue: verified as correct by
+     construction, not by a genuine live trigger.** `is_fully_idle()`
+     never read `True` during this entire session, for two legitimate
+     reasons, not a bug: `game_guard` hit the already-documented
+     `.exe$` false positive (Known Issue #20 -- `winedevice.exe` +
+     another session's `claude.exe`, no real game running), and this
+     Claude Code session (plus several others on this machine)
+     permanently trips the CLI-active check by design -- I cannot make my
+     own process disappear from within itself, so testing the genuine
+     positive path is structurally impossible for me to do alone, not
+     just inconvenient. Verified the actual wiring instead, with
+     `is_fully_idle` mocked true via `unittest.mock.patch` (not modifying
+     real code, just intercepting the check for one isolated test run):
+     `large_brain._run_job` correctly called `get_budget(turbidle=True)`
+     and produced the escalated systemd args; `IdleTaskRunner`'s loop
+     correctly dequeued a real queued task, called `agent.handle_request`
+     with a working `should_continue`, and consumed it from the queue.
+     Both are as verified as they can be without the user closing every
+     Claude Code session on the machine themselves.
+   - **tmux installed** (`pacman -S tmux`, was missing all session).
+   - **Confirmed genuinely working, real dispatch + correct real-world
+     result, not just a plausible-sounding reply:**
+     - `notify_tool.send_notification` -- real notification sent.
+     - `man_tool.read_man_page` -- read the real `ls` man page, gave a
+       correct, accurate answer about `-a` sourced from it.
+     - `timer_tool.set_timer` -- fired at exactly 20s, sent a real
+       notification, AND spoke via the new `announce` wiring
+       ("Timer's up: ..."), confirming that whole chain end to end.
+     - `clipboard_tool.write_clipboard` -- **on a retest, after deploying
+       the leaked-JSON-shape fix below** -- real clipboard content
+       matched exactly. (The *first* attempt this session, before that
+       fix, leaked as a fenced JSON block instead of a real call -- see
+       below.)
+     - `tui_tool` -- the underlying mechanism (`tmux new-session`/
+       `send-keys`/`capture-pane`/`kill-session`, plus the desktop-viewer
+       attach) all genuinely work -- confirmed via real tmux sessions and
+       real Konsole windows appearing and disappearing correctly. What
+       *doesn't* work reliably is the model chaining start -> read ->
+       interpret -> stop correctly for a compound request: asked to start
+       htop, read the load average, and stop it, the model instead
+       spawned FOUR separate htop sessions across several minutes, never
+       once called `read_screen` on any of them, and eventually just
+       reported "stopped" without ever answering the actual question.
+       One orphaned tmux session + Konsole window were left behind and
+       manually cleaned up afterward.
+     - `atspi_click` -- **NOT actually exercised.** Two attempts, both
+       derailed before reaching it: the first ("show me dolphin file
+       manager") went to `open_browser` with a fabricated URL instead of
+       `show_me`; the second, even naming `atspi_click` explicitly in the
+       request, used `find_text_on_screen` instead. The underlying
+       `atspi_tool.invoke_action` function itself is unverified live as
+       of this session -- next session should test it against a target
+       it can actually see (confirm via `read_focused_app` first that
+       the focused app exposes AT-SPI at all before asking for a click).
+     - `brightness_tool.get_brightness` -- reply matched real system
+       state (genuinely no `/sys/class/backlight` device, confirmed
+       independently via `ls`), but journal showed **zero tool dispatch**
+       for it -- ambiguous whether this was a real call that happens to
+       have no success-path logging (a real, separate small gap: only
+       `set_brightness` logs on success, `get_brightness` never logs at
+       all, even on its "no device" error path) or the model correctly
+       guessing the answer from the tool's own description text
+       ("...may not be available on a desktop with external monitors...
+       don't guess at a workaround" is verbatim in `TOOL_SCHEMAS`).
+       Added `log.info`/similar logging to `get_brightness`'s error path
+       is a cheap follow-up that would make this unambiguous next time
+       -- not done yet.
+   - **Two concrete, fixed contributing bugs to the fabrication pattern**
+     (both in `agent_loop.py`, one deployed and confirmed, one written
+     but not deployed this session -- see item 30 above for the earlier
+     `num_ctx` context-overflow fix this builds on):
+     1. `_find_leaked_tool_calls` only matched `toolname {...}` shaped
+        text. The model sometimes leaks the OTHER real function-call
+        shape instead -- a fenced ` ```json {"name": "...", "arguments":
+        {...}} ``` ` block -- which that regex never matched at all.
+        Added a second pass that tries `json.loads()` on each fenced
+        block. **Deployed and confirmed**: a clipboard-write retest after
+        this fix dispatched correctly instead of leaking (though it's
+        not certain whether the fix itself caused that, or the retry was
+        just luckier -- see below).
+     2. The "Relevant memories" text injected into every request gave no
+        signal it was OLD, past-conversation content rather than current
+        fact. Root-caused live: asked about screen brightness, the model
+        answered with fabricated screen CONTENT (including an invented
+        "SlimeScript" project name) lifted from an unrelated earlier
+        "what's on my screen" memory recalled via keyword overlap on
+        "screen" -- confirmed by directly calling `second_brain.recall()`
+        with the same query and finding that exact prior memory as the
+        top match. Reframed the preamble to explicitly say these are old,
+        separate-conversation, not-necessarily-relevant content, and that
+        current-state questions need an actual tool check regardless.
+        **Written, NOT deployed** -- sudo access was blocked for the rest
+        of this session (see below), so this is unverified live.
+   - **Broader, newly-clarified finding: the URL-fabrication pattern is
+     NOT Gemini-specific.** Item 31 above documented three fabricated
+     `gemini://`-shaped URLs. This session added a fourth, unrelated one:
+     asked to "show me dolphin file manager" (a native app, not a
+     website at all), the model called `open_browser` with
+     `https://dolphin:` instead of `show_me`. A fifth appeared mid-
+     session too: `https://gemjni.google.com` (a typo'd near-miss, not
+     caught by the fix below, see its own limitation note). This is a
+     general "when uncertain, fabricate a URL for open_browser" bias,
+     not something specific to the word "Gemini". Added a real code-level
+     safety net rather than relying on prompt wording alone (which had
+     already been tried twice and didn't hold): `browser_control.
+     _looks_like_real_url()` rejects a URL before ever opening it if it
+     has a non-http(s) scheme, a hostless/TLD-less host, or is an RFC
+     2606 placeholder domain (example.com and subdomains -- confirmed
+     live as an actual fabricated shape, from an earlier unrelated "what
+     time is it" tangent that opened `http://chat.example.com/HIPv6`).
+     Unit-verified against every real fabricated URL from this entire
+     session (all correctly rejected) and every legitimate URL tried
+     (all correctly accepted) -- **written, NOT deployed**, same reason
+     as above. Explicitly not a complete fix: a well-formed-but-wrong URL
+     (like the `gemjni.google.com` typo) still passes, since there's no
+     reasonable way to detect "looks almost right" without real DNS/
+     allowlist checking -- but it converts the WORST failure mode (silent
+     fake success) into a normal, recoverable tool-error round.
+   - **Deployment was blocked for roughly the back half of this session**:
+     `sudo -A`/`ksshaskpass` needs a live human to click the GUI prompt,
+     and the user was genuinely away as planned -- the cached sudo
+     timestamp from earlier expired partway through (the `tmux` pacman
+     install succeeded early on using a timestamp that was apparently
+     still warm from before the user stepped away; by the time the
+     memory-framing/URL-validation fixes were ready, both `sudo -A cp`
+     and `sudo -n cp` failed with "a password is required"). **The
+     currently-running `/opt/zelia` service is missing**: the memory-
+     framing reframe, the URL-fabrication rejection, and everything from
+     this point forward in the session. Sync + restart these before
+     trusting the "fixed" status of the memory/URL issues above -- they
+     are unverified-live, not confirmed-live, despite being unit-tested
+     in isolation.
+   - **Also cleaned up**: deleted (via `second_brain.forget()`) the
+     stored memories from this session's real fabrication incidents (the
+     "SlimeScript" screen-content fabrication, the Gemini/Steam-library
+     URL fabrications) so they don't keep reinforcing themselves as
+     "relevant past context" for similar future questions -- same
+     mechanism/reasoning as the one documented precedent for this
+     (Known Issue #11's "no games installed" cleanup).
+   - **Net assessment, worth stating plainly**: today's new features are
+     mechanically sound -- every tool that got a clean, unambiguous,
+     single-tool-call test passed with real, verified results
+     (notification, man page, timer, clipboard-on-retest, TUI's
+     underlying mechanics). The pattern that failed, every time, was
+     *multi-step or ambiguous* requests, where the model either
+     fabricates a plausible-sounding shortcut (a URL, a memory-sourced
+     answer) instead of chaining the right tool calls, or picks a
+     different, wrong tool than the one that was actually needed (even
+     when named explicitly). This is squarely Known Issue #11, now with
+     five-plus fresh, concrete, reproduced examples across totally
+     different tool categories in one session -- strong evidence this is
+     a real capability ceiling of the current small model + prompt
+     structure for compound requests, not a per-feature bug to chase one
+     at a time. Worth treating as the single highest-priority thing to
+     work on next, above adding further capability.
 
 Still open:
 
