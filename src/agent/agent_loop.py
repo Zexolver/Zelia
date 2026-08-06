@@ -833,7 +833,7 @@ class AgentLoop:
         self.second_brain.remember(user_text, role="user")
         memories = self.second_brain.recall(user_text)
 
-        route = classify(user_text, self.small_brain)
+        route = classify(user_text)
         log.info("Routed to %s brain", route)
 
         if route == "large":

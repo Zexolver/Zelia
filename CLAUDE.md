@@ -1580,6 +1580,28 @@ first rather than assuming the existing code is still correct.
    real progress on the fabrication pattern above, since that's the
    thing most likely to make every one of these look broken even if the
    underlying tool code is fine.
+32. ~~`router.py`'s model-based ambiguous-case fallback was silently
+   doubling every ordinary request's cold-prefill cost~~ -- found while
+   looking for a way to avoid "always injecting the tools JSON" per the
+   user's explicit ask. Root cause: Ollama only keeps ONE cached prompt
+   prefix per loaded model, and `router.classify()` was calling
+   `small_brain.chat()` a SECOND time per request, with its own short,
+   completely different, tools-free system prompt, for every request
+   that didn't match `BIG_PROJECT_HINTS` (i.e. nearly all of them). That
+   call evicted whatever was cached from the real tool-calling call's
+   much larger system+`TOOL_SCHEMAS` prefix, forcing THAT call to
+   cold-prefill from scratch every single time -- two cold prefills back
+   to back on nearly every ordinary request, not one. `router.classify`
+   is now keyword-only, no model call at all -- the fallback's own bias
+   was already "when unsure, prefer small" (the safe default, since
+   'small' has full tool access and 'large' has none -- see Known Issue
+   #19), so this loses very little real routing accuracy for a large,
+   continuous latency win. Confirmed live, clean before/after: a fresh
+   "say hello" after a full service restart (cold, worst case) dropped
+   to ~14s (previously 40-85s becoming the norm as the tool schema grew
+   this session), and the very next ordinary request measured ~4s
+   (warm-cache, prefix now genuinely stable across every real request
+   instead of being evicted every time).
 
 Still open:
 

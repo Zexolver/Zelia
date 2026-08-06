@@ -1,14 +1,30 @@
 """
 Decides which brain handles a request.
 
-Fast path: obvious keyword heuristics (cheap, no model call).
-Fallback: ask the small brain itself for a one-word classification -- still
-fast, since it's the always-loaded model.
+Keyword heuristics only -- no model call. Used to route a genuinely
+different, model-based classification call to the small brain for
+ambiguous cases (a short, tools-free system prompt asking for one word),
+but that was found live to cause a real, continuous efficiency problem:
+Ollama only keeps ONE cached prompt-prefix per loaded model, so that
+extra call -- with its own completely different, shorter system prompt --
+evicted whatever was cached from agent_loop.py's much larger system+
+TOOL_SCHEMAS prefix, forcing the REAL tool-calling call right after it to
+cold-prefill from scratch every single time. Since the ambiguous-
+classification fallback fired for nearly every ordinary request (only
+requests matching BIG_PROJECT_HINTS skip it), this meant almost every
+request was paying two cold prefills back to back instead of one warm
+one. Confirmed via the same reproduction method that caught the
+num_ctx/context-overflow bug earlier this session (see CLAUDE.md) --
+removing the extra call and keeping the tool-schema prefix stable across
+every request is what actually lets Ollama's cache do its job.
+
+Given up on purpose: the model-based fallback's own stated bias was
+"when genuinely unsure, prefer small" anyway, and 'small' already has
+full tool access (safe default -- see Known Issue #19, misrouting to
+'large' is the worse failure mode since it has zero tools at all), so a
+keyword-only router loses very little real routing accuracy for a
+continuous, meaningful latency win on every request.
 """
-from src.utils.logger import get_logger
-
-log = get_logger("router")
-
 BIG_PROJECT_HINTS = [
     "build a full", "build an entire", "write a complete", "refactor the whole",
     "create a full app", "create an entire", "take your time", "big project",
@@ -16,7 +32,7 @@ BIG_PROJECT_HINTS = [
 ]
 
 
-def classify(user_text: str, small_brain) -> str:
+def classify(user_text: str) -> str:
     """Returns 'small' or 'large'."""
     lowered = user_text.lower()
     if any(hint in lowered for hint in BIG_PROJECT_HINTS):
@@ -28,32 +44,4 @@ def classify(user_text: str, small_brain) -> str:
     # is a bad signal -- a long but ordinary multi-step tool-use request is
     # exactly the kind of thing that reads as "substantial" by word count
     # while still needing tools "large" doesn't have.
-
-    # Ambiguous -- let the small brain make a quick call rather than guessing wrong.
-    try:
-        result = small_brain.chat([
-            {
-                "role": "system",
-                "content": (
-                    "Reply with exactly one word: 'small' or 'large'.\n\n"
-                    "'large' is ONLY for self-contained generation work that needs no "
-                    "tools -- e.g. writing a substantial chunk of code or a document "
-                    "from scratch, in one shot, where nothing needs to be opened, "
-                    "clicked, browsed, or read from the live system first.\n\n"
-                    "'small' is for everything else, including multi-step requests, "
-                    "as long as any step needs to interact with the actual computer: "
-                    "opening or reading apps/websites/browser tabs, clicking, taking "
-                    "screenshots, reading or writing files, running commands. The "
-                    "large option has NO ability to do any of that -- if you pick "
-                    "'large' for a task that needs it, the task will simply fail. "
-                    "When genuinely unsure, prefer 'small'.\n\n"
-                    "No other text in your reply, just the one word."
-                ),
-            },
-            {"role": "user", "content": user_text},
-        ])
-        decision = result["content"].strip().lower()
-        return "large" if "large" in decision else "small"
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Router classification failed (%s); defaulting to small.", exc)
-        return "small"
+    return "small"
