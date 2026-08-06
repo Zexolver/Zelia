@@ -31,4 +31,5 @@ onnxruntime   # backs chromadb's DefaultEmbeddingFunction (ONNX MiniLM-L6-v2) --
 
 # Large brain
 airllm
+bitsandbytes  # needed for AirLLM's compression="4bit"/"8bit" -- without it, from_pretrained() fails outright once compression is actually requested (confirmed live)
 torch
