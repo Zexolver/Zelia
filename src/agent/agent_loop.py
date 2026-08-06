@@ -542,6 +542,17 @@ _LEAKED_CALL_RE = re.compile(
     re.DOTALL,
 )
 
+# Second, distinct leaked-call shape found live 2026-08-06: instead of
+# `toolname {"arg": "val"}` (what _LEAKED_CALL_RE above catches), the model
+# sometimes emits a fenced ```json { "name": "...", "arguments": {...} } ```
+# block -- an OpenAI-function-call-style JSON *object* with "name" as a key
+# rather than a bare prefix, which the first regex never matches at all (no
+# "toolname{" substring exists in this shape). Parsed by trying json.loads()
+# on each fenced block rather than a single regex, since matching balanced
+# nested braces with regex is fragile -- this only needs "does this parse,
+# and does it look like a tool call," not general JSON extraction.
+_FENCED_JSON_RE = re.compile(r'```(?:json)?\s*(\{.*?\})\s*```', re.DOTALL)
+
 
 def _find_leaked_tool_calls(content: str) -> list[tuple[str, dict]]:
     """Small-model replies sometimes contain what looks like a tool call as
@@ -561,6 +572,16 @@ def _find_leaked_tool_calls(content: str) -> list[tuple[str, dict]]:
         except json.JSONDecodeError:
             continue
         found.append((name, args))
+
+    known_names = {t["function"]["name"] for t in TOOL_SCHEMAS}
+    for match in _FENCED_JSON_RE.finditer(content):
+        try:
+            obj = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        name, args = obj.get("name"), obj.get("arguments")
+        if name in known_names and isinstance(args, dict):
+            found.append((name, args))
     return found
 
 
@@ -1000,7 +1021,24 @@ class AgentLoop:
         )
         user_content = user_text
         if memories:
-            user_content = "Relevant memories:\n" + "\n".join(f"- {m}" for m in memories) + f"\n\n{user_text}"
+            # Explicit, forceful framing added after a live, confirmed
+            # failure: asked a brand-new question about screen brightness,
+            # the model answered with fabricated screen CONTENT lifted from
+            # an unrelated earlier "what's on my screen" memory, presented
+            # as if it were something just observed right now -- no tool
+            # call happened at all. The bare "Relevant memories:\n- ..."
+            # framing gave no signal that this text is OLD and describes a
+            # DIFFERENT past moment, not the current state of anything.
+            user_content = (
+                "Relevant memories (OLD -- things said/observed in PAST separate "
+                "conversations, NOT current facts, may be about a completely different "
+                "topic or moment in time than this question -- never answer a question "
+                "about CURRENT state, e.g. what's on screen right now, current settings, "
+                "current file contents, from these alone; use the actual tool to check "
+                "instead):\n"
+                + "\n".join(f"- {m}" for m in memories)
+                + f"\n\nCurrent question:\n{user_text}"
+            )
         messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},

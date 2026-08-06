@@ -26,6 +26,7 @@ find_text_on_screen.
 """
 import shutil
 import subprocess
+from urllib.parse import urlparse
 
 import yaml
 
@@ -75,6 +76,48 @@ CHROMIUM_FAMILY = {"chromium", "chrome", "brave", BRAVE_FLATPAK_ID}
 FIREFOX_FAMILY = {"floorp", "firefox"}
 
 
+# Reserved documentation/example domains (RFC 2606) -- extremely common in
+# training data as filler/placeholder URLs, and confirmed live as one of
+# the actual shapes the small model fabricates when it doesn't know a real
+# URL (e.g. "http://chat.example.com/HIPv6" for a request it had no real
+# address for).
+_PLACEHOLDER_HOSTS = {"example.com", "example.org", "example.net", "example.edu"}
+_ALLOWED_NO_DOT_HOSTS = {"localhost"}
+
+
+def _looks_like_real_url(url: str) -> bool:
+    """Coarse sanity check, not real URL validation -- only catches the
+    specific fabrication shapes confirmed live, repeatedly, this session:
+    a made-up custom scheme (e.g. 'gemini://your-chat-url-here' -- the
+    model confusing Google's Gemini product with the real, unrelated
+    gemini:// network protocol), a host with no TLD at all (e.g.
+    'https://dolphin:' when asked to open a native app that isn't a
+    website), and RFC 2606 placeholder domains. Does NOT guarantee a URL
+    is real/reachable -- a well-formed but still-wrong URL will pass this
+    and just 404 normally, which is a far less confusing failure than
+    silently "opening" a nonsense scheme and then confidently claiming
+    success."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme and parsed.scheme not in ("http", "https"):
+        return False
+    hostname = (parsed.hostname or "").lower()
+    if not hostname and not parsed.scheme:
+        # No scheme at all (e.g. a bare "gemini.google.com") -- urlparse
+        # can't extract a hostname without one; fall back to the raw
+        # string's leading host-shaped segment instead.
+        hostname = url.split("/")[0].lower()
+    if not hostname:
+        return False
+    if any(hostname == h or hostname.endswith("." + h) for h in _PLACEHOLDER_HOSTS):
+        return False  # catches subdomains too, e.g. "chat.example.com"
+    if hostname in _ALLOWED_NO_DOT_HOSTS or hostname.replace(".", "").isdigit():
+        return True
+    return "." in hostname
+
+
 def open_browser(url: str, browser: str | None = None, default_browser: str = "floorp", new_window: bool = False) -> dict:
     """new_window=True forces a genuinely new window rather than a new tab
     in whatever's already open. Matters specifically for Chromium-based
@@ -85,6 +128,16 @@ def open_browser(url: str, browser: str | None = None, default_browser: str = "f
     pressing ctrl+tab (which cycles tabs, not opens windows) instead of
     just asking for a new window properly. --new-window/-new-window are
     real flags both browser families support for exactly this."""
+    if not _looks_like_real_url(url):
+        return {
+            "ok": False,
+            "error": (
+                f"'{url}' doesn't look like a real web address -- if you meant to open an "
+                "installed application (not a website), use show_me instead. If you don't "
+                "actually know the real URL for something specific, don't guess one; open "
+                "the site's real root URL and navigate/read from there instead."
+            ),
+        }
     global _session_browser_override
     target = browser or _session_browser_override or default_browser
     resolved = _resolve_launch(target)
