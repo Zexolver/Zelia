@@ -7,6 +7,7 @@ gtk-launch, wmctrl, xdg-open) -- no MCP servers involved.
 import difflib
 import glob
 import os
+import re
 import subprocess
 import configparser
 
@@ -56,16 +57,35 @@ def _best_app_match(query: str):
     if not entries:
         return None
     names = list(entries.keys())
+    lowered_query = query.lower()
+
+    # An app name appearing as a whole word inside the query is a much
+    # stronger signal than difflib's whole-string similarity ratio, and
+    # must be checked first -- confirmed live as a real bug: asking for
+    # "the Kate text editor application" scored closer (by
+    # get_close_matches' ratio, which penalizes length mismatch) to "KDE
+    # Connect Indicator" than to "Kate" itself, launching the wrong app
+    # entirely. Prefer the longest such match (e.g. "VS Code" over "Code"
+    # if both were somehow candidates).
+    word_matches = [
+        name for name in names
+        if re.search(rf"\b{re.escape(name.lower())}\b", lowered_query)
+    ]
+    if word_matches:
+        best = max(word_matches, key=len)
+        return best, entries[best]
+
     matches = difflib.get_close_matches(query, names, n=1, cutoff=0.4)
-    if not matches:
-        # try substring match as a looser fallback
-        lowered = query.lower()
-        for name in names:
-            if lowered in name.lower():
-                return name, entries[name]
-        return None
-    best = matches[0]
-    return best, entries[best]
+    if matches:
+        best = matches[0]
+        return best, entries[best]
+
+    # try substring match as a looser fallback (either direction: a short
+    # query inside a longer app name, or vice versa)
+    for name in names:
+        if lowered_query in name.lower() or name.lower() in lowered_query:
+            return name, entries[name]
+    return None
 
 
 def _focus_existing_window(name: str) -> bool:

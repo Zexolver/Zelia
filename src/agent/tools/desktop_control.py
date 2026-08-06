@@ -16,6 +16,7 @@ KDE (see _focus_window_kwin below) -- on other Wayland compositors there's
 no standard way to do this from outside, so it's skipped there and we
 just rely on newly-launched windows already having focus.
 """
+import getpass
 import json
 import os
 import shutil
@@ -33,15 +34,32 @@ log = get_logger("desktop_control")
 
 TERMINAL_CANDIDATES = ["konsole", "gnome-terminal", "xfce4-terminal", "alacritty", "kitty", "foot", "xterm"]
 
-# command, run-flag -- how each terminal takes "run this command and stay open"
+# command, run-flag -- how each terminal takes "run a command in it"
+#
+# Deliberately does NOT use each terminal's own native hold flag
+# (--hold/-hold/--noclose) -- open_terminal() already appends its own
+# "; echo; echo '[done...]'; read" to the shell command when keep_open is
+# true (the default), which is a single, uniformly-worded mechanism that
+# works the same way regardless of which terminal emulator is installed.
+# Confirmed live this is a real, reported bug when both were active at
+# once: Konsole's own --hold ALSO keeps the window open after the shell
+# (bash -c ...) process exits, i.e. after OUR read-based prompt has
+# already been answered and bash itself has exited -- so the user saw a
+# second, differently-worded "weird" terminal artifact (Konsole's own
+# native close-confirmation) pop up right after the first one they'd
+# already dismissed. Only our own script-level prompt should ever control
+# this now; every terminal here just runs the command plainly and exits
+# on its own once the script (including our appended read, if any) is
+# done -- letting X11/Wayland's own window-close-on-process-exit handle
+# the rest, consistently, with no per-terminal-emulator wording quirks.
 TERMINAL_RUN_FLAGS = {
-    "konsole": ["--hold", "-e", "bash", "-c"],
+    "konsole": ["-e", "bash", "-c"],
     "gnome-terminal": ["--", "bash", "-c"],
-    "xfce4-terminal": ["--hold", "-x", "bash", "-c"],
-    "alacritty": ["--hold", "-e", "bash", "-c"],
-    "kitty": ["--hold", "bash", "-c"],
+    "xfce4-terminal": ["-x", "bash", "-c"],
+    "alacritty": ["-e", "bash", "-c"],
+    "kitty": ["bash", "-c"],
     "foot": ["bash", "-c"],
-    "xterm": ["-hold", "-e", "bash", "-c"],
+    "xterm": ["-e", "bash", "-c"],
 }
 
 # Minimal symbolic-name -> ydotool key sequence map for the combos this
@@ -98,6 +116,108 @@ def open_terminal(command: str | None = None, keep_open: bool = True, cwd: str |
     return {"ok": True, "terminal": terminal, "action": "ran", "command": command}
 
 
+# Which real Linux virtual terminal ZELIA uses for run_in_vtty -- fixed
+# and out of the way of the ttys a normal desktop session actually uses
+# (tty1/tty2 are typically the graphical session + a login getty).
+_VTTY_NUMBER = 9
+
+
+def run_in_vtty(command: str, cwd: str | None = None) -> dict:
+    """Runs `command` on a genuinely separate real virtual terminal (a
+    kernel VT, not the graphical Wayland session at all) -- the
+    alternative offered when the user is actively using the computer and
+    a visible terminal window would compete for their screen/focus (see
+    agent_loop.py's busy-gate). Needs `openvt`, which needs a console fd
+    a normal user session doesn't have -- requires the narrowly-scoped
+    passwordless sudo rule documented in CLAUDE.md
+    (`/usr/bin/openvt -c 9 -- /usr/bin/runuser ...` only, nothing
+    broader). openvt itself doesn't drop privileges (confirmed via `man
+    openvt` -- no flag to run the target command as anyone but whoever
+    invoked it), so the actual command runs through `runuser` back to
+    the real invoking user -- root is only ever used transiently to
+    attach the console device, never to run the user's own command,
+    matching the trust level run_in_terminal/run_shell_quiet already
+    have. Output is captured to a log file (there's no OCR/screenshot
+    equivalent for a text console) so the result can still be reported
+    back; doesn't switch the user's visible display to that VT -- it
+    stays invisible unless they manually switch (Ctrl+Alt+F9) to check
+    on it themselves."""
+    if not shutil.which("openvt"):
+        return {"ok": False, "error": "openvt isn't installed -- can't run on a separate virtual terminal."}
+
+    log_path = tempfile.mktemp(prefix="zelia_vtty_", suffix=".log")
+    cd_prefix = f"cd {cwd!r} && " if cwd else ""
+    inner = f"{cd_prefix}({command}) > {log_path!r} 2>&1"
+    user = getpass.getuser()
+    try:
+        # NOTE: deliberately plain `sudo`, not `sudo -n` -- confirmed live
+        # that `-n` fails outright ("a password is required") even for a
+        # command an explicit NOPASSWD sudoers rule already covers, in
+        # this specific environment (no controlling tty, e.g. running as
+        # a systemd --user service). Plain sudo doesn't prompt for a
+        # password it doesn't need, so this doesn't reintroduce a hang.
+        subprocess.run(
+            ["sudo", "openvt", "-c", str(_VTTY_NUMBER), "--",
+             "runuser", "-u", user, "--", "bash", "-c", inner],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Command on the virtual terminal timed out after 120s.", "log_path": log_path}
+    except FileNotFoundError:
+        return {"ok": False, "error": "sudo isn't available -- can't get console access for openvt."}
+
+    try:
+        with open(log_path) as f:
+            output = f.read()
+    except OSError:
+        return {
+            "ok": False,
+            "error": (
+                "Couldn't get console access to run this on a separate virtual terminal "
+                "(needs the passwordless-sudo rule for openvt -- see CLAUDE.md). Falling back "
+                "to a visible terminal or waiting are the other options."
+            ),
+        }
+    finally:
+        try:
+            os.remove(log_path)
+        except OSError:
+            pass
+
+    log.info("Ran on vtty%d (cwd=%s): %s", _VTTY_NUMBER, cwd, command)
+    return {"ok": True, "vtty": _VTTY_NUMBER, "command": command, "output": output[-4000:]}
+
+
+def open_vtty_viewer(command: str) -> dict:
+    """Fire-and-forget: attaches `command` live on the dedicated VT
+    (_VTTY_NUMBER) without waiting for it to finish or capturing its
+    output. Unlike run_in_vtty above (which blocks with a timeout and
+    redirects output to a log file -- built for a command that runs to
+    completion and reports back), this is for something meant to run/
+    render indefinitely and interactively, e.g. `tmux attach -t <session>`
+    for tui_tool.py's vTTY-viewer mode -- its actual terminal I/O needs to
+    reach the VT's real console directly, not be piped into a file.
+
+    Same underlying sudo/openvt/runuser command shape and sudoers rule as
+    run_in_vtty (see its docstring) -- just launched async (Popen, no
+    timeout, no output redirection) instead of run-to-completion, since
+    "attach and stay attached" has no natural end to wait for. Not
+    visible unless the user manually switches VTs (Ctrl+Alt+F9), same as
+    run_in_vtty."""
+    if not shutil.which("openvt"):
+        return {"ok": False, "error": "openvt isn't installed -- can't use a separate virtual terminal."}
+    user = getpass.getuser()
+    try:
+        subprocess.Popen(
+            ["sudo", "openvt", "-c", str(_VTTY_NUMBER), "--",
+             "runuser", "-u", user, "--", "bash", "-c", command],
+        )
+    except FileNotFoundError:
+        return {"ok": False, "error": "sudo isn't available -- can't get console access for openvt."}
+    log.info("Attached %r live on vtty%d.", command, _VTTY_NUMBER)
+    return {"ok": True, "vtty": _VTTY_NUMBER}
+
+
 # --------------------------------------------------------------------------
 # Keyboard / mouse input backend selection
 #
@@ -148,18 +268,46 @@ def _input_backend():
     return _input_backend_module
 
 
+# Last successful click_at, used to reassert focus right before typing --
+# explicit user requirement after a live incident: mid-typing, an
+# unrelated Telegram notification popup grabbed real focus and the rest
+# of a synthetic keystroke sequence followed it into Telegram's own
+# search box instead of the intended window (see CLAUDE.md issue 24).
+# Re-clicking the last known target immediately before type_text/
+# press_key doesn't fully close that window (a popup mid-keystroke can
+# still steal it), but it does mean any drift *since* the click is
+# corrected right before typing starts, which is the common case (a
+# pause between clicking and typing, not an interruption mid-keystroke).
+_last_click = {"pos": None, "time": 0.0}
+_RECLICK_STALE_SECONDS = 30.0  # don't reclick against a target from a much earlier, unrelated action
+
+
+def _reassert_focus_before_typing() -> None:
+    pos = _last_click["pos"]
+    if pos is None or time.time() - _last_click["time"] > _RECLICK_STALE_SECONDS:
+        return
+    _input_backend().click_at(*pos)
+    time.sleep(0.05)
+
+
 def type_text(text: str) -> dict:
+    _reassert_focus_before_typing()
     return _input_backend().type_text(text)
 
 
 def press_key(combo: str) -> dict:
     """combo like 'ctrl+l', 'ctrl+t', 'Return', 'Tab', 'Escape'."""
+    _reassert_focus_before_typing()
     return _input_backend().press_key(combo)
 
 
 def click_at(x: int, y: int) -> dict:
     """Clicks at real screen pixel coordinates (x, y)."""
-    return _input_backend().click_at(x, y)
+    result = _input_backend().click_at(x, y)
+    if result.get("ok"):
+        _last_click["pos"] = (x, y)
+        _last_click["time"] = time.time()
+    return result
 
 
 

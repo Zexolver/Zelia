@@ -22,14 +22,14 @@ def is_destructive(command: str) -> bool:
     return any(re.search(p, command) for p in DESTRUCTIVE_PATTERNS)
 
 
-def run_shell(command: str, confirmed: bool = False, cwd: str | None = None) -> dict:
+def run_shell(command: str, confirmed: bool = False, cwd: str | None = None, timeout: int = 120) -> dict:
     if is_destructive(command) and not confirmed:
         return {"needs_confirmation": True, "command": command}
 
     log.info("Running shell command: %s", command)
     try:
         proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=120, cwd=cwd
+            command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=cwd
         )
         return {
             "needs_confirmation": False,

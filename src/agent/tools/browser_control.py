@@ -71,7 +71,20 @@ def _resolve_launch(name: str) -> tuple[str, str] | None:
     return None
 
 
-def open_browser(url: str, browser: str | None = None, default_browser: str = "floorp") -> dict:
+CHROMIUM_FAMILY = {"chromium", "chrome", "brave", BRAVE_FLATPAK_ID}
+FIREFOX_FAMILY = {"floorp", "firefox"}
+
+
+def open_browser(url: str, browser: str | None = None, default_browser: str = "floorp", new_window: bool = False) -> dict:
+    """new_window=True forces a genuinely new window rather than a new tab
+    in whatever's already open. Matters specifically for Chromium-based
+    browsers (Brave, Chromium, Chrome): they're single-instance, so a
+    plain relaunch while one's already running just opens a new tab in
+    the existing window, not a new window -- confirmed live as a real
+    bug, the small brain tried to work around that limitation itself by
+    pressing ctrl+tab (which cycles tabs, not opens windows) instead of
+    just asking for a new window properly. --new-window/-new-window are
+    real flags both browser families support for exactly this."""
     global _session_browser_override
     target = browser or _session_browser_override or default_browser
     resolved = _resolve_launch(target)
@@ -81,6 +94,13 @@ def open_browser(url: str, browser: str | None = None, default_browser: str = "f
 
     if not (url.startswith("http://") or url.startswith("https://")):
         url = f"https://{url}"
+
+    extra_flags = []
+    if new_window:
+        if ident in CHROMIUM_FAMILY:
+            extra_flags = ["--new-window"]
+        elif ident in FIREFOX_FAMILY:
+            extra_flags = ["-new-window"]
 
     if mode == "desktop" and ident == BRAVE_FLATPAK_ID:
         # `flatpak run` (not gtk-launch) so the debug-port flag actually
@@ -99,13 +119,17 @@ def open_browser(url: str, browser: str | None = None, default_browser: str = "f
             # cdp_reader.py's connection got a 403 even with the port open
             # and reachable over plain HTTP.
             f"--remote-allow-origins=http://127.0.0.1:{BRAVE_CDP_PORT}",
+            *extra_flags,
             url,
         ])
     elif mode == "binary":
-        subprocess.Popen([ident, url])
+        subprocess.Popen([ident, *extra_flags, url])
     else:
+        # gtk-launch doesn't forward arbitrary flags through to the
+        # underlying app (only URIs, via the .desktop file's own Exec
+        # line) -- new_window isn't achievable through this path.
         subprocess.Popen(["gtk-launch", ident, url])
-    log.info("Opened %s in %s (%s)", url, ident, mode)
+    log.info("Opened %s in %s (%s, new_window=%s)", url, ident, mode, new_window)
     return {"ok": True, "browser": ident, "url": url}
 
 
