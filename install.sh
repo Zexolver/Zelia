@@ -60,6 +60,11 @@ PACMAN_PKGS=(
     gobject-introspection
     cairo
     spectacle
+    tmux
+    wl-clipboard
+    xclip
+    wireplumber
+    brightnessctl
 )
 if [ "$GPU_VENDOR" = "amd" ]; then
     PACMAN_PKGS+=(vulkan-radeon lib32-vulkan-radeon vulkan-icd-loader)

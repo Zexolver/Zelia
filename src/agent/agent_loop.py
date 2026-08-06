@@ -10,11 +10,24 @@ from src.agent.tools.shell_tool import run_shell, is_destructive
 from src.agent.tools.file_tool import FileTool
 from src.agent.tools.browser_tool import fetch_url
 from src.agent.tools.code_tool import CodeTool
-from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool, browser_tabs, page_reader, cdp_reader
+from src.agent.tools import screen_tool, app_launcher, desktop_control, browser_control, steam_tool, browser_tabs, page_reader, cdp_reader, self_source_tool
+from src.agent.tools import clipboard_tool, volume_tool, brightness_tool, notify_tool, power_tool, timer_tool
+from src.agent.tools import man_tool, tui_tool, atspi_tool
 from src.router import classify
+from src import idle_detect
 from src.utils.logger import get_logger
 
 log = get_logger("agent_loop")
+
+# Tools that actually inject synthetic input into whatever's currently
+# focused on the real, visible desktop -- these are the ones that can
+# compete with the user for control of their own screen while they're
+# actively using it (gaming, typing, etc). Opening/focusing an app
+# (show_me, open_browser, focus_window) is deliberately NOT in this set
+# -- those already go through preserve_focus_if_user_active, which is a
+# much lighter touch (restores the user's focus right after), not a
+# sustained interaction the way a click+type sequence is.
+INPUT_INJECTING_TOOLS = {"click_at", "type_text", "press_key", "atspi_click"}
 
 TOOL_SCHEMAS = [
     {
@@ -22,6 +35,18 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "run_in_terminal",
             "description": "Run a shell command (git, cd, builds, etc.) in a NEW VISIBLE terminal window so the user can watch it happen in real time. This is the default way to run commands -- use this unless the user specifically asked for something quiet/background.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_in_vtty",
+            "description": "Run a shell command on a completely separate real Linux virtual terminal (not the graphical desktop at all) -- for when the user is actively using the computer (gaming, etc.) and offered this as an alternative to a visible terminal window so ZELIA doesn't compete for their screen/focus. Only offer/use this after the user has been asked and picked it over waiting. Not visible unless the user manually switches virtual terminals themselves; report the result back from what this returns.",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
@@ -46,6 +71,30 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_file",
             "description": "Read a file inside ZELIA's workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_own_source",
+            "description": "List files/directories in ZELIA's own source code (the src/ directory of the code actually running right now), for self-diagnosis -- e.g. 'why can't you do X', 'what tools do you actually have'. Read-only, and separate from the user's own project files (list_dir/read_file, which are scoped to the workspace instead).",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path relative to src/, default '.' for the top level."}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_own_source",
+            "description": "Read one of ZELIA's own source files (path relative to src/, e.g. 'agent/agent_loop.py') to understand her own actual behavior/capabilities. Read-only -- she cannot modify her own running code this way.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -157,6 +206,21 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "click_brave_element",
+            "description": "Clicks whatever on a Brave tab's page contains the given text -- e.g. selecting one specific past conversation out of a sidebar list of chats (Gemini, Claude.ai). Use this whenever the user asks to open/pick/switch to a SPECIFIC existing chat/item by name/topic, instead of guessing with click_at or just opening the site fresh (which lands on a blank new chat, not the one they meant). No synthetic mouse input -- talks to Brave's remote-debugging protocol directly, same as read_brave_tab. Only works if Brave has remote debugging enabled (see read_brave_tab's notes) and the target text is actually somewhere on the currently loaded page (e.g. visible in an open chat-history sidebar) -- if you don't know the exact title of the chat the user means, read_brave_tab first to find it, then click it by that exact (or a substring of that) title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hint": {"type": "string", "description": "Text to match against the tab's title or URL, e.g. 'gemini', 'claude.ai'."},
+                    "text": {"type": "string", "description": "Text to find and click on the page, e.g. the title of a specific past chat."},
+                },
+                "required": ["hint", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "describe_screen",
             "description": "Look at the user's screen with a vision model and answer a question about what's visible (layout, images, what an app looks like). Slower than read_screen_text -- use that instead for pure text reading.",
             "parameters": {
@@ -198,10 +262,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "open_browser",
-            "description": "Open a URL in a real, visible browser window. Uses the configured default browser unless `browser` is given.",
+            "description": "Open a URL in a real, visible browser window. Uses the configured default browser unless `browser` is given. If the browser is already running, this opens a new TAB in the existing window by default -- pass new_window=true if the user specifically asked for a new WINDOW. Never use press_key/ctrl+tab to try to open a new window, that cycles between existing tabs instead. NEVER invent or guess a URL you don't actually know, e.g. a specific chat/conversation's exact address -- only pass a URL you have real reason to believe is correct (a well-known site's homepage/root URL, a URL the user gave you directly, or one you actually read from a tool result). If asked to open a SPECIFIC existing item (a particular past chat, a particular page in an app) that you don't have a real URL for, that's not this tool's job -- open the site's plain root URL here if needed, then use read_brave_tab to see what's actually there and click_brave_element to select the specific thing, instead of fabricating a URL.",
             "parameters": {
                 "type": "object",
-                "properties": {"url": {"type": "string"}, "browser": {"type": "string"}},
+                "properties": {
+                    "url": {"type": "string"}, "browser": {"type": "string"},
+                    "new_window": {"type": "boolean", "description": "True only if the user specifically asked for a new window, not just a new tab/page."},
+                },
                 "required": ["url"],
             },
         },
@@ -234,10 +301,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "type_text",
-            "description": "Type text into whatever window currently has keyboard focus (e.g. after opening a browser or app). Works on both Xorg and Wayland.",
+            "description": "Type text into whatever window currently has keyboard focus (e.g. after opening a browser or app). Works on both Xorg and Wayland. If the user is actively using the computer, this is blocked unless 'confirmed' is set (after they've said to go ahead anyway).",
             "parameters": {
                 "type": "object",
-                "properties": {"text": {"type": "string"}},
+                "properties": {
+                    "text": {"type": "string"},
+                    "confirmed": {"type": "boolean", "description": "Set true only after the user was asked about interrupting their active use and said to proceed."},
+                },
                 "required": ["text"],
             },
         },
@@ -246,10 +316,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "press_key",
-            "description": "Send a key combo to the focused window, e.g. 'ctrl+l' (address bar), 'ctrl+t' (new tab), 'Return', 'Tab', 'Escape'.",
+            "description": "Send a key combo to the focused window, e.g. 'ctrl+l' (address bar), 'ctrl+t' (new tab), 'Return', 'Tab', 'Escape'. If the user is actively using the computer, this is blocked unless 'confirmed' is set (after they've said to go ahead anyway).",
             "parameters": {
                 "type": "object",
-                "properties": {"combo": {"type": "string"}},
+                "properties": {
+                    "combo": {"type": "string"},
+                    "confirmed": {"type": "boolean", "description": "Set true only after the user was asked about interrupting their active use and said to proceed."},
+                },
                 "required": ["combo"],
             },
         },
@@ -270,10 +343,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "click_at",
-            "description": "Click at specific screen coordinates. Usually preceded by find_text_on_screen to locate what to click.",
+            "description": "Click at specific screen coordinates. Usually preceded by find_text_on_screen to locate what to click. If the user is actively using the computer, this is blocked unless 'confirmed' is set (after they've said to go ahead anyway).",
             "parameters": {
                 "type": "object",
-                "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                "properties": {
+                    "x": {"type": "integer"}, "y": {"type": "integer"},
+                    "confirmed": {"type": "boolean", "description": "Set true only after the user was asked about interrupting their active use and said to proceed."},
+                },
                 "required": ["x", "y"],
             },
         },
@@ -290,9 +366,176 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard",
+            "description": "Reads or writes the desktop clipboard. action='read' for 'what's on my clipboard'; action='write' with text for 'copy this for me'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["read", "write"]},
+                    "text": {"type": "string", "description": "Required for action='write'."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "volume",
+            "description": "Gets or sets system volume/mute. action='get' reports level+muted state. action='set' needs percent (0-100, or slightly over for boosted volume) -- for a relative change ('turn it up a bit'), get first, then set with the adjusted number. action='mute'/'unmute' toggles audio.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["get", "set", "mute", "unmute"]},
+                    "percent": {"type": "integer", "description": "Required for action='set'."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "brightness",
+            "description": "Gets or sets screen brightness (0-100), if this machine has a controllable display backlight -- may not be available on a desktop with external monitors, report the error plainly if so.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["get", "set"]},
+                    "percent": {"type": "integer", "description": "Required for action='set'."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_notification",
+            "description": "Sends a real desktop notification popup with a title and message. Use when something is worth surfacing visually without necessarily interrupting the user out loud.",
+            "parameters": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}, "message": {"type": "string"}},
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "power",
+            "description": "Locks the screen, or shuts down/restarts/suspends the computer. action='lock' is reversible/low-risk -- just do it, no confirmation needed. action='shutdown'/'restart'/'suspend' ends the session or interrupts whatever's running -- always confirm with the user first unless they've already explicitly confirmed in this same request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["lock", "shutdown", "restart", "suspend"]},
+                    "confirmed": {"type": "boolean", "description": "Set true only after the user has explicitly confirmed a shutdown/restart/suspend."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "timer",
+            "description": "Sets, cancels, or lists timers/reminders. action='set' needs seconds (convert whatever duration the user said into seconds yourself) and message (what to announce when it fires, spoken + a desktop notification). action='cancel' needs timer_id (from a previous 'set'). action='list' reports active timer ids.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["set", "cancel", "list"]},
+                    "seconds": {"type": "number", "description": "Required for action='set'."},
+                    "message": {"type": "string", "description": "Required for action='set'."},
+                    "timer_id": {"type": "string", "description": "Required for action='cancel'."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_man_page",
+            "description": "Reads the local man page (or --help output as a fallback) for an installed CLI command -- use this to check a command's REAL, actual flags/usage on THIS machine before running an unfamiliar or complex command, instead of guessing from what you already know (which may be outdated or wrong for the version actually installed here).",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "atspi_click",
+            "description": "Clicks a button/control in the currently-focused app by its accessible name, via the accessibility tree directly -- no screenshot, no OCR, no coordinate guessing. Try this FIRST for clicking something in a native Qt/GTK app (most system apps, e.g. Dolphin, Kate, system settings) -- it's far more precise than find_text_on_screen + click_at. Falls back automatically with a clear error if the focused app doesn't expose AT-SPI at all (common for Electron/CEF apps like Steam/Discord/Brave) or no matching control is found -- use find_text_on_screen + click_at for those instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "The control's visible label/name, e.g. 'Save', 'OK', 'Settings'."}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tui_session",
+            "description": "Drives an interactive terminal (TUI) tool -- htop, vim, a REPL, an ncurses installer menu, anything that takes over the terminal and needs ongoing keystrokes rather than just printing output and exiting. action='start' needs command (and optionally location: 'desktop' opens a real visible terminal window (default); 'vtty' attaches on a separate virtual terminal, invisible unless the user manually switches to it -- use this specifically when asked to run something in the background/without disturbing the user, e.g. while they're gaming; 'background' attaches no viewer at all) -- returns a session_id. action='send_keys' needs session_id+keys (set enter=false for single keypresses like 'q' or arrow keys). action='read_screen' needs session_id -- check this before deciding what to send next. action='stop' needs session_id. action='list' shows all running session ids.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["start", "send_keys", "read_screen", "stop", "list"]},
+                    "command": {"type": "string", "description": "Required for action='start', e.g. 'htop' or 'vim notes.txt'."},
+                    "location": {"type": "string", "enum": ["desktop", "vtty", "background"], "description": "Optional, for action='start'."},
+                    "session_id": {"type": "string", "description": "Required for action='send_keys'/'read_screen'/'stop'."},
+                    "keys": {"type": "string", "description": "Required for action='send_keys'."},
+                    "enter": {"type": "boolean", "description": "For action='send_keys' -- default true."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_idle_task",
+            "description": "Queue a low-priority background task to work on later, only once the system is genuinely idle (no keyboard/mouse activity, no game running, no Gemini/Claude Code CLI active, and no active request already in progress). Use this when the user says something like 'when you have nothing else to do', 'in the background', 'whenever I'm not using the computer', or explicitly asks you to remember a task for idle time -- not for anything they want done now. The task description should be a clear, self-contained instruction, since it'll be run on its own later with no other context from this conversation.",
+            "parameters": {
+                "type": "object",
+                "properties": {"description": {"type": "string", "description": "Clear, self-contained instruction for the idle task."}},
+                "required": ["description"],
+            },
+        },
+    },
 ]
 
 MAX_TOOL_ROUNDS = 10
+
+# Tools whose result depends only on their arguments (reading/checking
+# state, never causing an action) -- safe to short-circuit on an exact
+# repeat instead of re-running. Confirmed live: the small brain called
+# list_installed_steam_games with identical (empty) arguments 10 times in
+# a row, burning through the entire tool-round budget instead of just
+# answering from the first result. Deliberately excludes anything with a
+# side effect (run_shell, write_file, click_at, open_browser, ...) --
+# repeating one of those might be exactly what's intended (e.g. "check
+# again"), so only genuinely read-only tools get deduplicated.
+IDEMPOTENT_TOOLS = {
+    "read_file", "list_own_source", "read_own_source", "list_apps",
+    "list_installed_steam_games", "read_all_browser_tabs", "read_full_page",
+    "read_brave_tab", "list_brave_tabs", "read_screen_text", "describe_screen",
+    "find_text_on_screen", "fetch_url", "read_man_page",
+    # clipboard/volume/brightness/timer/tui_session are single tool names
+    # covering both read and write actions -- deliberately NOT idempotent-
+    # cached (the cache key is (name, args), so a repeated action='set'
+    # call would wrongly be treated as a no-op repeat of a real command).
+    # These are all cheap/fast operations anyway, so losing the repeat-
+    # dedup benefit here doesn't reintroduce the original runaway-expensive-
+    # rescan problem this mechanism exists for.
+}
 
 _LEAKED_CALL_RE = re.compile(
     r'\b(' + "|".join(re.escape(t["function"]["name"]) for t in TOOL_SCHEMAS) + r')\s*(\{.*?\})',
@@ -324,13 +567,15 @@ def _find_leaked_tool_calls(content: str) -> list[tuple[str, dict]]:
 SCREEN_VISIBILITY_TOOLS = {
     "read_screen_text", "describe_screen", "find_text_on_screen", "click_at",
     "read_all_browser_tabs", "read_full_page", "read_brave_tab", "list_brave_tabs",
+    "click_brave_element", "atspi_click",
 }
 
 
 class AgentLoop:
     def __init__(self, small_brain, large_brain, second_brain, workspace_dir: str, ask_confirmation,
                  vision_model: str = "moondream", ollama_host: str = "http://127.0.0.1:11434",
-                 default_browser: str = "floorp", config_path: str = "", ask_for_password=None):
+                 default_browser: str = "floorp", config_path: str = "", ask_for_password=None,
+                 game_guard=None, idle_task_runner=None, announce=None):
         self.small_brain = small_brain
         self.large_brain = large_brain
         self.second_brain = second_brain
@@ -342,6 +587,9 @@ class AgentLoop:
         self.ollama_host = ollama_host
         self.default_browser = default_browser
         self.config_path = config_path
+        self.game_guard = game_guard  # src.game_guard.GameGuard instance; None disables the gaming half of the busy-check
+        self.idle_task_runner = idle_task_runner  # src.idle_tasks.IdleTaskRunner instance; None means add_idle_task reports unavailable
+        self.announce = announce  # fn(text) -> None, speaks unprompted (e.g. main.py's safe_speak) -- used by set_timer to announce when a timer fires, independent of any request's original speak() callback (which is long gone by the time a timer actually goes off)
 
     def _ensure_unlocked_for_screen_access(self) -> dict | None:
         """Called before any tool that needs the real screen visible (not a
@@ -363,11 +611,65 @@ class AgentLoop:
             return {"ok": False, "error": "Screen is locked and the unlock attempt failed."}
         return None
 
+    def _user_busy(self) -> bool:
+        """True if the user appears to be actively at the keyboard/mouse,
+        or a game/heavy foreground app is running (src/idle_detect.py,
+        src/game_guard.py) -- the signal for whether an input-injecting
+        tool would be fighting the user for control of their own screen
+        right now."""
+        if idle_detect.is_user_active():
+            return True
+        if self.game_guard is not None and self.game_guard.is_gaming():
+            return True
+        return False
+
+    def _busy_gate(self, name: str, args: dict) -> dict | None:
+        """Returns a blocking result if `name` needs the real desktop and
+        the user is busy and hasn't already said to go ahead anyway
+        (args['confirmed']); None if it's fine to proceed. Only gates
+        tools that either sustain visible interaction (click/type) or pop
+        a persistent window (a visible terminal) -- see
+        INPUT_INJECTING_TOOLS's comment for why opening/focusing an app
+        isn't included."""
+        if args.get("confirmed"):
+            return None
+        if name in INPUT_INJECTING_TOOLS:
+            if self._user_busy():
+                return {
+                    "ok": False,
+                    "user_currently_active": True,
+                    "note": (
+                        "The user appears to be actively using the computer (typing/clicking, "
+                        "or a game running) right now. Don't retry this automatically -- ask them "
+                        "out loud whether you should wait until they're idle, or go ahead anyway. "
+                        "Only retry this exact tool call with confirmed=true if they say to proceed."
+                    ),
+                }
+        elif name == "run_in_terminal":
+            if self._user_busy():
+                return {
+                    "ok": False,
+                    "user_currently_active": True,
+                    "note": (
+                        "The user appears to be actively using the computer (typing/clicking, or a "
+                        "game running) right now, and a visible terminal window would compete for "
+                        "their screen. Ask them out loud: wait until they're idle, run it via "
+                        "run_in_vtty instead (a separate real virtual terminal, invisible unless "
+                        "they switch to it, doesn't touch the graphical session at all), or go "
+                        "ahead anyway with a visible terminal. Only retry run_in_terminal itself "
+                        "with confirmed=true if they specifically choose the visible-terminal option."
+                    ),
+                }
+        return None
+
     def _dispatch_tool(self, name: str, args: dict) -> dict:
         if name in SCREEN_VISIBILITY_TOOLS:
             lock_error = self._ensure_unlocked_for_screen_access()
             if lock_error is not None:
                 return lock_error
+        busy_block = self._busy_gate(name, args)
+        if busy_block is not None:
+            return busy_block
         if name == "run_in_terminal":
             command = args.get("command", "")
             if is_destructive(command) and not args.get("confirmed"):
@@ -376,11 +678,17 @@ class AgentLoop:
                 result = desktop_control.preserve_focus_if_user_active(
                     lambda: desktop_control.open_terminal(command=command, cwd=self.files.workspace_dir)
                 )
+        elif name == "run_in_vtty":
+            result = desktop_control.run_in_vtty(command=args.get("command", ""), cwd=self.files.workspace_dir)
         elif name == "run_shell_quiet":
             args.pop("quiet", None)  # tool name already implies this; small models sometimes add it anyway
             result = run_shell(cwd=self.files.workspace_dir, **args)
         elif name == "read_file":
             result = self.files.read(**args)
+        elif name == "list_own_source":
+            result = self_source_tool.list_own_source(**args)
+        elif name == "read_own_source":
+            result = self_source_tool.read_own_source(**args)
         elif name == "write_file":
             result = self.files.write(**args)
         elif name == "delete_file":
@@ -399,6 +707,8 @@ class AgentLoop:
             result = cdp_reader.read_tab(args.get("hint", ""))
         elif name == "list_brave_tabs":
             result = cdp_reader.list_tab_titles()
+        elif name == "click_brave_element":
+            result = cdp_reader.click_text(args.get("hint", ""), args.get("text", ""))
         elif name == "describe_screen":
             result = screen_tool.describe_screen(args.get("question", ""), self.vision_model, self.ollama_host)
         elif name == "show_me":
@@ -416,15 +726,85 @@ class AgentLoop:
         elif name == "set_default_browser":
             result = browser_control.set_default_browser(config_path=self.config_path, **args)
         elif name == "type_text":
+            args.pop("confirmed", None)
             result = desktop_control.type_text(**args)
         elif name == "press_key":
+            args.pop("confirmed", None)
             result = desktop_control.press_key(**args)
         elif name == "find_text_on_screen":
             result = desktop_control.find_text_on_screen(**args)
         elif name == "click_at":
+            args.pop("confirmed", None)
             result = desktop_control.click_at(**args)
         elif name == "focus_window":
             result = desktop_control.preserve_focus_if_user_active(lambda: desktop_control.focus_window(**args))
+        elif name == "add_idle_task":
+            if self.idle_task_runner is None:
+                result = {"ok": False, "error": "Idle task queue isn't available right now."}
+            else:
+                position = self.idle_task_runner.add(args.get("description", ""))
+                result = {"ok": True, "queued_position": position}
+        elif name == "clipboard":
+            action = args.get("action", "")
+            if action == "write":
+                result = clipboard_tool.write_clipboard(args.get("text", ""))
+            else:
+                result = clipboard_tool.read_clipboard()
+        elif name == "volume":
+            action = args.get("action", "")
+            if action == "set":
+                result = volume_tool.set_volume(args.get("percent", 50))
+            elif action == "mute":
+                result = volume_tool.set_mute(True)
+            elif action == "unmute":
+                result = volume_tool.set_mute(False)
+            else:
+                result = volume_tool.get_volume()
+        elif name == "brightness":
+            if args.get("action") == "set":
+                result = brightness_tool.set_brightness(args.get("percent", 50))
+            else:
+                result = brightness_tool.get_brightness()
+        elif name == "send_notification":
+            result = notify_tool.send_notification(args.get("title", "ZELIA"), args.get("message", ""))
+        elif name == "power":
+            action = args.get("action", "")
+            if action == "lock":
+                result = power_tool.lock_screen()
+            elif not args.get("confirmed"):
+                result = {"needs_confirmation": True, "reason": f"About to {action} the computer. Are you sure?"}
+            else:
+                result = power_tool.power_action(action)
+        elif name == "timer":
+            action = args.get("action", "")
+            if action == "cancel":
+                result = timer_tool.cancel_timer(args.get("timer_id", ""))
+            elif action == "list":
+                result = timer_tool.list_timers()
+            else:
+                def _on_fire(message: str) -> None:
+                    notify_tool.send_notification("ZELIA timer", message)
+                    if self.announce is not None:
+                        self.announce(f"Timer's up: {message}")
+                result = timer_tool.set_timer(args.get("seconds", 0), args.get("message", ""), _on_fire)
+        elif name == "read_man_page":
+            result = man_tool.read_man_page(args.get("command", ""))
+        elif name == "atspi_click":
+            result = atspi_tool.invoke_action(args.get("name", ""))
+        elif name == "tui_session":
+            action = args.get("action", "")
+            if action == "send_keys":
+                result = tui_tool.send_keys(args.get("session_id", ""), args.get("keys", ""), args.get("enter", True))
+            elif action == "read_screen":
+                result = tui_tool.read_tui_screen(args.get("session_id", ""))
+            elif action == "stop":
+                result = tui_tool.stop_tui(args.get("session_id", ""))
+            elif action == "list":
+                result = tui_tool.list_tui_sessions()
+            else:
+                result = tui_tool.start_tui(
+                    args.get("command", ""), args.get("location", "desktop"), cwd=self.files.workspace_dir,
+                )
         else:
             return {"ok": False, "error": f"Unknown tool {name}"}
 
@@ -436,11 +816,19 @@ class AgentLoop:
             return {"ok": False, "error": "User declined."}
         return result
 
-    def handle_request(self, user_text: str, speak, remember_and_reply_when_done):
+    def handle_request(self, user_text: str, speak, remember_and_reply_when_done, should_continue=None):
         """
         speak: fn(text) -> None, spoken immediately (e.g. quick ack / final answer)
         remember_and_reply_when_done: fn(text) -> None, called later for big
             background jobs so a completed project gets announced whenever it finishes
+        should_continue: optional fn() -> bool, checked at the top of each tool
+            round; returning False aborts the request early instead of
+            finishing it (returns "aborted" instead of the usual None). Used
+            by src/idle_tasks.py so a low-priority background task stops the
+            moment the user becomes active again, rather than fighting them
+            for the keyboard/mouse/GUI focus it may be mid-use of. Voice/text
+            requests don't pass this -- None means "never abort," the
+            existing behavior.
         """
         self.second_brain.remember(user_text, role="user")
         memories = self.second_brain.recall(user_text)
@@ -461,7 +849,7 @@ class AgentLoop:
 
             context = "\n".join(f"- {m}" for m in memories)
             prompt = f"Relevant context from past conversations:\n{context}\n\nTask:\n{user_text}"
-            status = self.large_brain.submit_async(prompt, on_done=on_done)
+            status = self.large_brain.submit_async(prompt, on_done=on_done, workspace_dir=self.files.workspace_dir)
             if status == "queued":
                 speak("Actually, looks like you're gaming right now -- I'll hold off and start that as soon as you're done.")
             return
@@ -510,11 +898,52 @@ class AgentLoop:
             "window, default is Floorp) rather than just fetching text, unless the "
             "user only asked you to look something up for yourself. Use "
             "set_browser_for_now / set_default_browser if the user names a "
-            "different browser to use.\n"
+            "different browser to use. 'open a new window' means open_browser with "
+            "new_window=true -- read_all_browser_tabs' Ctrl+Tab cycling is only for "
+            "reading existing tabs' content, never a way to open or manage windows.\n"
             "- When asked to 'show me X', use the show_me tool.\n"
-            "- To interact with something only visible on screen (a button in a "
-            "browser, a menu in an app like Godot), use find_text_on_screen to "
-            "locate it, then click_at, then type_text/press_key as needed.\n"
+            "- If asked to explain/diagnose your own behavior or capabilities (why "
+            "something happened, what tools you have, how a feature works), use "
+            "list_own_source/read_own_source to actually check your real code rather "
+            "than guessing -- don't use these for the user's own project files, "
+            "that's read_file/list_dir.\n"
+            "- show_me/launch_or_focus_app work for ANY installed app, not just ones "
+            "you've been told about by name -- use list_apps if unsure what's installed. "
+            "To click something in a native app's window (a button, a menu item), try "
+            "atspi_click FIRST -- it's exact and doesn't need OCR/coordinates at all. It "
+            "only works for apps that expose accessibility info though (most Qt/GTK apps; "
+            "NOT Electron/CEF apps like Steam/Discord/Brave) -- if it reports no match/not "
+            "available, fall back to find_text_on_screen to locate the thing, then "
+            "click_at, then type_text/press_key as needed.\n"
+            "- For a command-line tool you're not fully sure how to use correctly -- "
+            "unfamiliar flags, an unusual command, anything where a wrong guess could "
+            "matter -- use read_man_page to check its REAL usage on this machine first, "
+            "rather than guessing from what you already know (which may not match the "
+            "actual installed version).\n"
+            "- For anything interactive in a terminal that isn't just 'run a command and "
+            "read its output' -- htop, vim, a REPL, an ncurses menu -- use start_tui + "
+            "send_keys + read_tui_screen instead of run_in_terminal/run_shell_quiet, "
+            "which can't send further input once launched. Use location='vtty' "
+            "specifically when asked to do this in the background/without disturbing the "
+            "user (e.g. while they're gaming) instead of a visible window.\n"
+            "- Opening or focusing an app (show_me, launch_or_focus_app) does not "
+            "type or click anything by itself -- if the task also involves typing "
+            "text, pressing keys, or clicking something, you must still call "
+            "type_text/press_key/click_at yourself as separate tool calls after "
+            "the app is open, in the same turn. Never describe text as 'typed' or "
+            "an action as 'done' in your reply unless you actually called the tool "
+            "that does it -- narrating an action instead of calling its tool is a "
+            "real bug, not a shortcut.\n"
+            "- click_at/type_text/press_key/run_in_terminal can come back with "
+            "'user_currently_active': true instead of running -- this means the user "
+            "is actively at the keyboard/mouse or a game is running, and doing this "
+            "now would fight them for control of their own screen. Don't retry "
+            "automatically. Ask them out loud what they'd like: wait until they're "
+            "idle, or go ahead anyway (for run_in_terminal specifically, also offer "
+            "run_in_vtty -- a separate real virtual terminal that doesn't touch their "
+            "graphical session at all, invisible unless they switch to it themselves). "
+            "Only retry the exact same tool call with confirmed=true once they've told "
+            "you which they want, and only if they chose to proceed rather than wait.\n"
             "- Never answer a question about specific on-screen content (what's in a "
             "list, a library, a file, a window) without actually looking first via "
             "read_screen_text/describe_screen/find_text_on_screen. Opening or focusing "
@@ -529,6 +958,41 @@ class AgentLoop:
             "the tab in question is open in Brave specifically, use read_brave_tab "
             "instead of read_full_page -- it reads the page's actual content directly "
             "(more accurate, and doesn't need to move the mouse/keyboard at all).\n"
+            "- 'Gemini' here always means Google's Gemini AI chat, at https://gemini.google.com "
+            "-- NOT the unrelated 'gemini://' network protocol (a completely different, much "
+            "older internet protocol that happens to share the name). Never construct a "
+            "'gemini://...' URL for anything -- that is never correct here, regardless of what "
+            "it might otherwise look plausible for.\n"
+            "- If asked to open/pick/switch to a SPECIFIC existing chat/conversation by "
+            "name or topic (e.g. Gemini, Claude.ai chat history): NEVER pass a made-up URL "
+            "to open_browser for this -- you do not know the real address of a specific "
+            "past chat, and guessing one (e.g. something like 'gemini.google.com/chat' or "
+            "similar) produces a broken page, not the chat meant. If Gemini/Claude.ai is "
+            "already open in Brave, skip open_browser entirely and go straight to "
+            "read_brave_tab with hint='gemini' (or 'claude') -- NOT the chat's topic/name, "
+            "hint matches the TAB's title/URL, not page content -- to see what chats are "
+            "listed. If no chat list/sidebar shows up in that read, the history sidebar is "
+            "probably just collapsed (confirmed on Gemini specifically) -- use "
+            "click_brave_element to click a likely sidebar/menu/history toggle button "
+            "(match on something like 'menu', 'sidebar', or 'history'; icon-only buttons "
+            "match by their aria-label even with no visible text), then read_brave_tab "
+            "again (same hint='gemini') to see the now-visible chat titles. Once you can "
+            "see the chat meant, "
+            "use click_brave_element with that chat's exact title to select it -- never "
+            "click_at/OCR-guess for any of this, click_brave_element is exact and doesn't "
+            "touch the real mouse.\n"
+            "- If the user asks you to do something later/in the background/whenever "
+            "you're not busy, or specifically 'when idle', use add_idle_task instead of "
+            "doing it now -- it queues the task to run automatically once the system is "
+            "genuinely idle (no one at the keyboard, no game running). Don't use this for "
+            "anything the user wants done right now.\n"
+            "- power_action (shutdown/restart/suspend) ends the session or interrupts "
+            "whatever's running -- always ask the user to confirm first, same as a "
+            "destructive shell command, unless they already explicitly confirmed in this "
+            "same request. lock_screen is different -- it's easily reversible, just do it, "
+            "no confirmation needed.\n"
+            "- For set_timer, convert whatever duration the user said (minutes, hours, "
+            "'in half an hour', etc.) into seconds yourself before calling it.\n"
             "- Keep spoken replies concise -- this is a voice conversation. Describe "
             "code, file contents, commands, and errors in plain natural language a "
             "non-technical listener would understand -- never read raw code syntax, "
@@ -542,8 +1006,23 @@ class AgentLoop:
             {"role": "user", "content": user_content},
         ]
 
+        # A single short-circuited repeat (see IDEMPOTENT_TOOLS below) plus a
+        # note wasn't always enough on its own -- confirmed live: the model
+        # kept calling the same already-answered tool 8 more times after the
+        # first short-circuit, still burning the whole round budget with no
+        # final answer. REPEAT_LIMIT is the harder backstop: once a single
+        # call has repeated past it, tools get withheld entirely on the next
+        # round, forcing a plain-text completion the model has to answer
+        # from what's already in the conversation instead of calling anything.
+        REPEAT_LIMIT = 2
+        seen_calls: dict[tuple, dict] = {}
+        repeat_counts: dict[tuple, int] = {}
+        force_final_answer = False
         for _ in range(MAX_TOOL_ROUNDS):
-            message = self.small_brain.chat(messages, tools=TOOL_SCHEMAS)
+            if should_continue is not None and not should_continue():
+                log.info("Aborting mid-request -- should_continue() returned False (system is no longer idle).")
+                return "aborted"
+            message = self.small_brain.chat(messages, tools=None if force_final_answer else TOOL_SCHEMAS)
             tool_calls = message.get("tool_calls")
             if not tool_calls:
                 content = message.get("content", "").strip()
@@ -576,7 +1055,32 @@ class AgentLoop:
                 try:
                     if isinstance(args, str):
                         args = json.loads(args)
-                    result = self._dispatch_tool(name, args)
+                    call_key = (name, json.dumps(args, sort_keys=True))
+                    if name in IDEMPOTENT_TOOLS and call_key in seen_calls:
+                        repeat_counts[call_key] = repeat_counts.get(call_key, 1) + 1
+                        result = dict(seen_calls[call_key])
+                        if repeat_counts[call_key] > REPEAT_LIMIT:
+                            force_final_answer = True
+                            result["_note"] = (
+                                "You have called this the same way several times now. Tools are "
+                                "disabled for your next reply -- answer the user's question directly "
+                                "using the result above, in plain text."
+                            )
+                        else:
+                            result["_note"] = (
+                                "You already called this with these exact arguments earlier in this "
+                                "turn -- this is the same result, not a fresh check. Answer from it "
+                                "instead of calling this again."
+                            )
+                        log.warning(
+                            "Short-circuited a repeated call to %s%s (repeat #%d)",
+                            name, args, repeat_counts[call_key],
+                        )
+                    else:
+                        result = self._dispatch_tool(name, args)
+                        if name in IDEMPOTENT_TOOLS:
+                            seen_calls[call_key] = result
+                            repeat_counts[call_key] = 1
                 except Exception as exc:  # noqa: BLE001
                     # A single bad tool call (malformed args, a hallucinated
                     # extra kwarg, a permission error, etc.) must not take

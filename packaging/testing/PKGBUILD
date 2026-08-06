@@ -18,10 +18,15 @@ depends=(
     'ydotool'
     'portaudio'
     'at-spi2-core'
+    'tmux'
 )
 optdepends=(
     'vulkan-radeon: Ollama GPU acceleration on AMD (small brain + vision model)'
     'spectacle: KDE Wayland screenshot fallback (screen_tool.py)'
+    'wl-clipboard: clipboard read/write on Wayland (clipboard_tool.py)'
+    'xclip: clipboard read/write on Xorg (clipboard_tool.py)'
+    'wireplumber: volume control via wpctl (volume_tool.py) -- falls back to pactl if absent'
+    'brightnessctl: sets up backlight write permissions automatically (brightness_tool.py works without it via sysfs directly, but needs a udev rule either way on hardware that has a controllable backlight)'
 )
 makedepends=('python-virtualenv' 'git' 'gobject-introspection' 'cairo')
 provides=('zelia')

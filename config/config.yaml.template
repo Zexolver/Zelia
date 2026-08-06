@@ -98,10 +98,41 @@ brains:
   large:
     # Used for big/quality-sensitive project work (large coding tasks, etc).
     # Runs via AirLLM so it can fit on limited VRAM by streaming layers from disk.
+    # Has real read/write/run-shell tool access scoped to the workspace dir
+    # (see coding_agent.py) -- meant to keep working on a project
+    # unattended, e.g. while you're out of Claude usage for the week.
     provider: "airllm"
-    model: "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    # Codestral-22B: a real coding-focused model that actually fits typical
+    # home-machine disk/RAM budgets at 4bit compression (~11GB on disk,
+    # ~12GB peak RAM during a coding job by default -- see max_ram_mb
+    # below). Ungated on HuggingFace, no token needed. Mistral's own
+    # non-production license -- fine for this personal-use assistant, but
+    # worth knowing if this config is ever reused commercially. Swap back
+    # to a 70B+ model here if disk/RAM headroom allows and quality matters
+    # more than speed/safety margin for a given machine.
+    model: "mistralai/Codestral-22B-v0.1"
     compression: "4bit"        # cuts disk/VRAM footprint further; set to null for full precision
     max_new_tokens: 2048
+    # System RAM/CPU budget for the coding worker (see resource_manager.py) --
+    # enforced via a systemd --user scope, not just a suggestion. Tune these
+    # down further on a machine that's tight on RAM/cores; the coding agent
+    # is explicitly meant to be slow-but-safe background work, not fast.
+    max_ram_mb: 6144           # hard cap; MemorySwapMax=0 alongside it means this kills the job instead of swapping the whole system into a crawl
+    cpu_quota_percent: 400     # e.g. 400 = up to 4 cores' worth of wall-clock CPU time, leaving the rest for foreground work (Gemini CLI, etc)
+    cpu_weight: 25             # cgroup-relative scheduling priority under contention (default for everything else is 100) -- this yields when the CPU is actually busy
+
+    # "Turbidle": when a coding job is *launched* while the system is
+    # genuinely doing nothing else (no keyboard/mouse activity, no game
+    # running, no Gemini/Claude Code CLI process active -- see
+    # resource_manager.is_fully_idle), the three caps above are replaced
+    # with these much higher ones for that job, since nothing else needs
+    # protecting from it right then. Checked once at job start, not
+    # re-evaluated live mid-job (see large_brain.py). Uncomment to override
+    # the auto-computed defaults (most of the machine's RAM/cores, minus a
+    # safety margin) -- usually not necessary.
+    # turbidle_max_ram_mb: 24576
+    # turbidle_cpu_quota_percent: 1100
+    # turbidle_cpu_weight: 100
 
 # ---------------------------------------------------------------------------
 # GPU budget
@@ -147,6 +178,24 @@ gaming:
   extra_process_patterns: []   # add your own, e.g. ["cs2", "valorant.exe"]
   normal_nice: 0
   gaming_nice: 10              # higher = lower priority; 19 is the max
+
+# ---------------------------------------------------------------------------
+# Idle tasks
+#
+# A low-priority background to-do list (src/idle_tasks.py) -- give her a
+# task via the add_idle_task tool ("do X when you have nothing else to
+# do") and she'll run it, through the exact same tool-calling pipeline as
+# a normal request, but only once the system is genuinely idle: no recent
+# keyboard/mouse activity, no game running, no Gemini/Claude Code CLI
+# process active (see resource_manager.is_fully_idle, the same check
+# Turbidle uses). Aborts and requeues a task the instant the user becomes
+# active again mid-run, rather than fighting them for the keyboard/mouse/
+# GUI focus. Results aren't spoken aloud (nobody's likely listening if the
+# system was actually idle) -- only logged and stored to second_brain.
+# ---------------------------------------------------------------------------
+idle_tasks:
+  enabled: true
+  poll_seconds: 30             # how often to check whether it's safe to start the next queued task
 
 # ---------------------------------------------------------------------------
 # Screen / vision

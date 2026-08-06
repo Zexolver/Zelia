@@ -1094,16 +1094,187 @@ first rather than assuming the existing code is still correct.
      on the next call, but this is worth remembering: a broken portal
      call can take down the shared daemon for *every* app using portals,
      not just ZELIA's own request.
-   - **Not yet done:** `click_at`'s positioning accuracy through this
-     backend is unverified (no cursor-position feedback exists for the
-     isolated seat — `input_backend_ydotool.py`'s KWin-scripting readback
-     was seat-specific to the *default* seat, doesn't apply here; the
-     implemented anchor-then-offset strategy is a reasonable guess, not
-     confirmed), and `scroll()` is likewise untested. Live config still
-     pins `input_backend` to `"ydotool"` until these are verified. User
-     explicitly deferred non-browser apps (games, Blender, Steam's UI) to
-     later — this work only needs to cover what's reachable through the
-     portal/CDP paths for now.
+   - **`click_at` positioning verified live.** The anchor-then-offset
+     strategy (huge relative move to pin the cursor at a screen edge,
+     then one exact relative offset from that known origin) was tested
+     against Kate's real window geometry on this 3-monitor setup
+     (target 3320,1015 inside a 640x508 window at 3000,761) with
+     before/after `_kwin_active_window_title()` checks: the click landed
+     inside the intended window and kept it focused (an earlier
+     same-mechanism test with a careless guessed coordinate visibly
+     switched focus to the wrong window, which is what proved the
+     mechanism itself was accurate and the first failure was just a bad
+     coordinate, not a backend bug). Final proof: a scripted
+     focus→click→type→ctrl+s→read-file-from-disk round trip produced the
+     exact expected string on disk with no corruption or misdirection.
+   - **Consent is now one-time forever, not per-process.** The
+     RemoteDesktop portal interface here is version 2, which supports
+     `persist_mode`/`restore_token` (confirmed via `busctl --user
+     introspect ... org.freedesktop.portal.RemoteDesktop` →
+     `.version 2`) — the same officially-supported "remember this grant"
+     mechanism screen-sharing apps use, not a workaround. `SelectDevices`
+     is called with `persist_mode: 2` ("until explicitly revoked"); the
+     `restore_token` `Start()` returns is saved to
+     `~/.zelia/state/portal_restore_token` and replayed on every future
+     `SelectDevices` call. Confirmed live across brand-new processes
+     (including the real running `zelia` service after a restart): the
+     first-ever grant needed one real consent-dialog click, every
+     process since has skipped the dialog entirely (session ready in
+     ~1-2 seconds, no wait for a human). This was an explicit user
+     request ("make a special popup I only have to click once and you
+     are authorized forever") — implemented via the portal's own spec
+     feature rather than any kind of auto-click/bypass.
+   - **CRITICAL FINDING, REVERTED:** after the above validation looked
+     clean, the user reported their real cursor visibly disappeared
+     while ZELIA was typing -- a direct symptom the whole point of this
+     backend was supposed to make impossible. Verified directly rather
+     than assumed: read the *default seat's* cursor position via KWin
+     scripting (`workspace.cursorPos`) immediately before and after a
+     portal `click_at(100, 100)` call. It moved (`2642,1221` ->
+     `3847,1549`) in direct response to the "isolated" transient-seat
+     pointer motion. This means `NotifyPointerMotion` over this D-Bus
+     API is **not** rendering to a separate/invisible cursor on this
+     system -- it's moving the exact same on-screen cursor the real
+     mouse controls, i.e. the core isolation assumption for this backend
+     is **wrong**, at least for the plain `Notify*` D-Bus method family.
+     Live config was immediately reverted to `"ydotool"` as the safe
+     default. **Do not switch back to `"portal"` or claim this backend
+     is safe until this is actually understood and fixed.**
+   - **Root-caused via actual source, not guesswork.** Read
+     xdg-desktop-portal-kde's real source (invent.kde.org, tag v6.7.3):
+     its `Notify*` D-Bus handlers go through
+     `WaylandIntegration::FakeInput`, i.e. the legacy
+     `org_kde_kwin_fake_input` Wayland protocol -- confirmed present as
+     a literal string in the installed `/usr/lib/xdg-desktop-portal-kde`
+     binary. `fake_input` has always targeted the real default seat;
+     it predates and has nothing to do with transient seats. This is
+     the definitive explanation for the cursor-hijacking bug above, not
+     just a hypothesis anymore.
+   - **`ConnectToEIS` is a genuinely different code path** -- confirmed
+     by reading the source, not assumed. xdg-desktop-portal-kde just
+     proxies it to a *private* KWin D-Bus method
+     (`org.kde.KWin.EIS.RemoteDesktop.connectToEIS`, object path
+     `/org/kde/KWin/EIS/RemoteDesktop`, service `org.kde.KWin`),
+     implemented by KWin's own `src/plugins/eis` plugin (installed
+     locally as `/usr/lib/qt6/plugins/kwin/plugins/eis.so`, found via
+     `strings`-grepping every kwin-related `.so` for the D-Bus
+     interface name -- much faster than guessing GitLab paths). This
+     plugin is the one that actually talks EIS/transient-seat.
+   - **First attempt hung indefinitely -- root cause found, not a
+     ScreenCast pairing requirement.** Read KWin's actual
+     `eisbackend.cpp` (tag v6.7.3): its capability mapping only ever
+     grants `EIS_DEVICE_CAP_KEYBOARD` for the portal's "keyboard" bit --
+     it **never** grants `EIS_DEVICE_CAP_TEXT`. The first version of
+     `input_backend_eis.py` waited for a `CAP_TEXT` device (the simpler
+     keysym-based text API) before proceeding, which KWin will simply
+     never hand out on this version -- an infinite wait, not a hang bug.
+     The "Only stream input" log line that looked suspicious was
+     independently ruled out by reading `remotedesktop.cpp` directly: it's
+     just the normal log message for an input-only (no screen-sharing)
+     session and does not block or gate anything -- the ScreenCast-pairing
+     hypothesis from earlier in this investigation was wrong.
+   - **Rewrote the backend around `EIS_DEVICE_CAP_KEYBOARD` (raw evdev
+     keycodes) instead of `CAP_TEXT` (keysyms).** This needs a real
+     keymap-aware keysym -> keycode lookup, which needs `libxkbcommon`.
+     No usable Python xkbcommon binding could be installed --
+     `/opt/zelia` is a read-only pacman-owned install and `pip install`
+     needs root there, which needs an interactive sudo password nobody
+     was present to type (this whole phase of work happened after the
+     user went to sleep, per their explicit "do what you can without
+     me"). Solved with a small self-contained `ctypes` binding against
+     the system `libxkbcommon.so.0` instead (loads the keymap EIS hands
+     back via `ei_device_keyboard_get_keymap()`/`ei_keymap_get_fd()`,
+     builds a keysym -> (keycode, needs_shift) table via
+     `xkb_keymap_key_get_syms_by_level()`) -- no new dependency, no
+     install step, consistent with how libei/liboeffis are already
+     wrapped in this project.
+   - **Session bootstrap no longer uses `liboeffis`.** Its
+     `oeffis_create_session()` has no `persist_mode`/`restore_token`
+     parameter at all, so every session it creates needs a fresh
+     consent dialog -- a non-starter for unattended overnight work.
+     Rewrote it around the same manual `CreateSession`/`SelectDevices`/
+     `Start` D-Bus dance `input_backend_portal.py` already uses
+     (restore_token included), then added one more manual call for
+     `ConnectToEIS` itself (needs `call_with_unix_fd_list_sync`, not
+     plain `call_sync`, since it replies with a real attached unix fd,
+     not through the async Request/Response object-path pattern the
+     other three calls use). **Confirmed live:** reused the *same*
+     restore token `input_backend_portal.py` had already gotten
+     approved earlier in the night -- session came up fully bound
+     (pointer/button/scroll/keyboard) in well under a second, zero new
+     consent dialog. This is real progress: the "click once, forever"
+     mechanism works across backends, not just within one.
+   - **New, more fundamental finding: window/keyboard focus may be a
+     single global concept in KWin, not per-seat.** Live test: opened a
+     fresh Kate document, used the EIS backend's `click_at` to focus it
+     (confirmed correct -- active window became Kate), then `type_text`
+     a marker string. Partway through, an unrelated Telegram
+     notification popup grabbed real focus -- and the *rest* of the
+     synthetic keystrokes followed it: a fragment of the typed text
+     ("est 123 OK") landed in Telegram's own search box, confirmed via
+     screenshot, and had to be cleaned up (Escape) immediately since it
+     was a real side effect in the user's actual Telegram client, not a
+     throwaway test surface. Kate's title still showed unsaved changes,
+     meaning some characters landed correctly in Kate before the
+     interruption -- so this isn't a "click_at pointed at the wrong
+     thing" bug, it's that the isolated seat's *keyboard* target
+     followed the same globally-active window as the real seat the
+     instant that window changed. If window activation genuinely is a
+     single compositor-wide concept in this KWin version regardless of
+     which seat originates input (plausible -- there's no inherent
+     notion of "per-seat active window" in traditional window
+     management), this would be a **deeper blocker than the cursor bug**:
+     it would mean no input backend (this one, a hypothetical raw
+     `ext-transient-seat-v1` client, or anything else routed through
+     KWin's current window manager) can give ZELIA truly independent
+     window focus while the user is simultaneously active, only
+     independent *devices*. Not yet confirmed as a hard architectural
+     limit vs. something fixable in how this backend tracks/sets focus
+     -- next session should try to isolate this specifically (e.g. does
+     explicitly re-focusing the target window via EIS's own pointer
+     click, right before each keystroke, hold up better than focusing
+     once up front?) before concluding it's unfixable.
+   - **Where this leaves things:** `input_backend_eis.py` is a complete,
+     working implementation of the real EIS-isolation path (pointer
+     motion is now genuinely believed separate from the default seat's
+     rendered cursor -- not yet re-confirmed with the same
+     `workspace.cursorPos` before/after test used to catch the original
+     bug, since the Telegram incident cut the test session short; that
+     recheck is the first thing to do next time). Keyboard *devices* are
+     isolated; keyboard *focus targeting* is not proven isolated, and
+     the Telegram evidence points the other way. `~/.zelia/config.yaml`
+     stays on `"ydotool"`. Do not switch to `"eis"` (not yet wired into
+     `desktop_control.py`'s dispatcher at all -- deliberately, given the
+     open focus question) until the focus-tracking question above is
+     resolved.
+   - **Found and fixed two independent bugs while validating this,
+     neither specific to the portal backend:**
+     1. `app_launcher._best_app_match`'s fuzzy matching
+        (`difflib.get_close_matches` against the whole query string)
+        picked "KDE Connect Indicator" over "Kate" when asked to open
+        "the Kate text editor application" — a long natural-language
+        query scores *worse* against a short exact name than against an
+        unrelated similarly-long name, purely because of
+        `SequenceMatcher.ratio()`'s length sensitivity. Fixed by
+        checking for an exact whole-word match first (regex `\bname\b`
+        against the lowercased query) before ever falling back to
+        difflib.
+     2. The small brain sometimes narrates an action ("I've typed the
+        sentence...") in its final reply without actually having called
+        `type_text`/`press_key`/`click_at` that turn — confirmed via
+        journal logs showing zero `input_backend_portal` activity behind
+        a reply that claimed typing had happened. Partially addressed
+        with an explicit system-prompt instruction (opening/focusing an
+        app doesn't type or click anything by itself; never describe an
+        action as done unless the tool was actually called), which fixed
+        the simple case but not a subtler one where `preserve_focus_if_
+        user_active` correctly declined to steal focus (because a human
+        was genuinely active on the machine at the time) and the model
+        then hallucinated success anyway instead of reporting the block.
+        **Not fully solved — small-model tool-calling discipline under
+        multi-step sequences is a real, separate follow-up item**. Task
+        #21's comprehensive regression pass should probe this
+        specifically once picked up.
 25. ~~Reading a Brave tab required screenshots+OCR+synthetic Page-Down,
    which (a) is the exact kind of input this project is moving away from
    (issue 24) and (b) is lossy/slow compared to just asking the browser
@@ -1134,6 +1305,281 @@ first rather than assuming the existing code is still correct.
    forward into a future custom-distro version of this project without
    review; they're a deliberate, acknowledged security/functionality
    tradeoff for now, not a settled good practice.
+26. ~~The small brain could burn its entire tool-round budget calling the
+   same read-only tool over and over instead of answering from the first
+   result~~ -- confirmed live: `list_installed_steam_games` (identical,
+   empty arguments) got called 10 times in a row (`MAX_TOOL_ROUNDS`),
+   never producing a final answer. Fixed in two layers in
+   `agent_loop.py`'s `handle_request`:
+   1. `IDEMPOTENT_TOOLS` (a fixed set of read-only tools whose result
+      only depends on their arguments -- `read_file`,
+      `list_installed_steam_games`, `read_screen_text`, etc, deliberately
+      excluding anything with a side effect like `run_shell`/`click_at`,
+      since repeating one of *those* might be exactly what's intended)
+      gets its result cached per exact `(name, args)` call this turn --
+      an exact repeat is served from the cache instead of re-running,
+      with a short note telling the model it already has this answer.
+      Confirmed live this alone cut real re-execution from 10 Steam
+      scans down to 1.
+   2. That wasn't sufficient on its own -- the model kept making
+      (now-free) repeat calls instead of stopping, so `REPEAT_LIMIT = 2`
+      escalates: once a call repeats more than twice in one turn, the
+      *next* `chat()` call is made with `tools=None`, forcing a plain-text
+      final answer instead of another tool round.
+   Layer 1 is confirmed working live. Layer 2 (the escalation actually
+   stopping the loop) was deployed but the one retest attempt was
+   confounded by real, unrelated gaming-induced VRAM contention (see
+   item 27 below) making the whole system too slow to get a clean
+   signal -- still worth a clean re-test once the machine's genuinely
+   idle, not yet fully confirmed end-to-end.
+27. **"Turbidle"** (Turbo+idle) -- explicit user request, paired with item
+   26 above ("fix the repeated-tool-call bug, then build Turbidle").
+   Requested as "separate AI layers onto both CPU and GPU for faster
+   speed, but only when the system is doing absolutely nothing else,
+   including Gemini/Claude Code CLI" -- that literal mechanism doesn't
+   actually apply on this hardware: AirLLM has no usable CUDA/ROCm path
+   on this AMD card (issue 12 above) so it's CPU-only regardless of idle
+   state, and the small brain is already 100% GPU-resident whenever
+   nothing else is competing for VRAM (confirmed live via `ollama ps`'s
+   `size_vram` field -- it only partially fell back to CPU, 52%/48%
+   split, while a real Roblox Studio session was actively running and
+   contending for the same 8GB). Reframed as the inverse of
+   `resource_manager.py`'s existing AirLLM coding-worker caps: those
+   exist specifically to *protect* the rest of the machine (Gemini CLI,
+   foreground responsiveness) from the background coding worker;
+   Turbidle lifts that protection when there's genuinely nothing left to
+   protect, so the worker gets most of the machine instead of a
+   deliberately small slice of it.
+   - `resource_manager.is_fully_idle(game_guard)` is the gate: requires
+     `idle_detect.is_user_active()` to be `False` (no recent
+     keyboard/mouse), the passed `GameGuard.is_gaming()` to be `False`,
+     and a new `_coding_cli_active()` check (psutil process-name scan for
+     `claude`/`gemini`, same pattern as `game_guard._process_match()`) to
+     also be `False`. Deliberately broad/best-effort like game_guard's
+     own matching -- errs toward treating more things as "active" rather
+     than risking Turbidle kicking in mid-work.
+   - `resource_manager.get_budget(cfg, turbidle=True)` returns a much
+     higher `ResourceBudget`: RAM and CPU-core defaults are computed live
+     from `psutil` (total system RAM/core count minus a safety margin --
+     4096MB RAM, 1 CPU core -- rather than a fixed guess, since a good
+     idle budget depends on the actual machine), CPU weight goes to 100
+     (normal priority, not the deprioritized 25 the plain caps use, since
+     nothing else is contending). Overridable via new, optional
+     `turbidle_max_ram_mb`/`turbidle_cpu_quota_percent`/
+     `turbidle_cpu_weight` keys in `config.yaml`'s `brains.large` section.
+   - `large_brain.py`'s `_run_job` calls `is_fully_idle(self.game_guard)`
+     once at job launch and passes the result into `get_budget()`. Checked
+     once, not re-evaluated live mid-job (like the existing gaming
+     queue-check) -- a job that starts under Turbidle and then the user
+     comes back mid-run keeps its already-granted budget rather than
+     being throttled out from under it; the plain caps already exist to
+     keep the rest of the machine usable even then, so this isn't unsafe,
+     just not instantly reactive. Live-resizing an already-running
+     scope's cgroup limits (`systemctl --user set-property`) would make
+     it reactive; not attempted, a bigger separate change.
+   Confirmed live, negative case: with a real Roblox Studio session
+   running (game_guard genuinely detects `GAMING`) and this very Claude
+   Code session running (`_coding_cli_active()` correctly matches its own
+   `claude` process), `is_fully_idle()` correctly returned `False` on
+   both independent signals. Not yet confirmed live in the positive case
+   (an actual genuinely-idle window with a real AirLLM job launched
+   during it) -- the gating logic mirrors already-proven patterns
+   (`game_guard.is_gaming()`, `idle_detect.is_user_active()`) closely
+   enough to trust, but the full escalated-budget path hasn't been
+   watched fire end-to-end yet. Worth doing once the machine's actually
+   idle and a coding job gets queued.
+28. ~~Asking ZELIA to open a specific existing Gemini chat opened a blank
+   new one instead~~ — explicit user report, from during a week they were
+   locked out of Claude Code and relying on her for basic browser tasks
+   ("I just want her to actually function and do average tasks
+   properly"). Root-caused live, not guessed, in two parts:
+   1. Gemini's chat-history sidebar starts **collapsed**.
+      `document.body.innerText` (what `cdp_reader.read_tab` uses)
+      correctly only returns *visible* text per spec — a collapsed
+      sidebar's chat titles genuinely aren't there to read or click yet.
+      Confirmed via direct DOM inspection: the sidebar container had
+      literal CSS class `collapsed`, its `<gem-nav-list-item>` entries
+      had empty `textContent` until expanded.
+   2. Even after correctly selecting a chat (URL/title update
+      immediately), the rendered message content stayed stale — confirmed
+      live, the OLD conversation's text was still what `read_tab` returned
+      10+ seconds after clicking a different chat. Angular's client-side
+      route transition isn't a reliable signal that the new content has
+      actually rendered.
+   Fixed in `src/agent/tools/cdp_reader.py`:
+   - New `click_text(hint, text)` (exposed as the `click_brave_element`
+     tool) finds and clicks a DOM element by visible text OR
+     aria-label/title — the aria-label half is what lets it hit icon-only
+     buttons like the sidebar's "Open sidebar" toggle, which has no
+     visible text at all. Prefers a real `<a href>`/`<button>`/
+     `role=button` over a generic wrapper, checked *before* any
+     innermost-element narrowing — an early version incorrectly excluded
+     Gemini's actual `<a href="/app/...">` link because its own child
+     `<span>` duplicated the same label text, which looked (wrongly) like
+     "not the most specific match." No synthetic mouse input, same
+     principle as `read_tab`.
+   - `_navigate_and_wait()`: once a click changes the URL, forces a real
+     `Page.navigate` reload and polls `body.innerText`'s length until it
+     stops changing, instead of trusting the SPA's own state transition.
+   - System prompt (`agent_loop.py`) now tells the small brain: if
+     `read_brave_tab` shows no chat list, try clicking a likely
+     sidebar/menu toggle first, look again, then click the specific chat
+     by exact title — never click_at/OCR-guess for this, since
+     click_brave_element is exact.
+   Confirmed live, full round trip, against the user's real Gemini
+   account: expanded the sidebar, read real chat titles ("Steam Library:
+   Hide vs. Private", "Rooted Android Customization and Linux
+   Integration", etc.), clicked one by exact title, confirmed
+   URL+title+actual message content all correctly switched (not just
+   URL/title) in ~5.6s total, repeated with a second different chat to
+   confirm it generalizes, then navigated back to the original chat and
+   re-collapsed the sidebar to leave the browser as it was found. Not
+   tested: whether a single very long conversation virtualizes/lazily
+   renders older messages (i.e. whether `read_tab` could still miss
+   content within one long chat) — both chats tested fit well under
+   `cdp_reader.MAX_CHARS` (20000) with no sign of virtualization; if a
+   long single chat ever reads suspiciously short, check that next.
+   **Found a second real bug testing this through the actual agent
+   pipeline** (not just the module directly): the small model passed
+   `text` as a dict (e.g. `{"text": "Steam Library"}`) instead of a plain
+   string on a real live call, crashing `click_text` on `.lower()`. Fixed
+   with `_coerce_str_arg()` (tries the obvious dict keys, falls back to
+   `str()`), applied to both `text` and `hint` (via `find_tab`) since
+   both are equally exposed to this. Confirmed fixed live: re-ran the
+   same failure shape directly and it now correctly extracts the string
+   and clicks correctly instead of crashing. Worth a broader pass across
+   other tool functions taking plain string args, which likely have the
+   same unguarded assumption -- this is the first *confirmed* case of a
+   small-model type mismatch actually happening in practice, not just a
+   theoretical risk.
+29. ~~Opening a terminal via ZELIA sometimes showed a second, oddly-worded
+   "weird terminal" artifact with a number, after the normal "press enter
+   to close" prompt~~ -- explicit user report. Root cause:
+   `desktop_control.py`'s `TERMINAL_RUN_FLAGS` passed each terminal
+   emulator its own native `--hold`/`-hold` flag *in addition to*
+   `open_terminal()`'s own manually-appended
+   `"; echo; echo '[done...]'; read"` keep-open script -- two independent
+   keep-open mechanisms stacked on each other. Confirmed via `konsole
+   --help-all` that `--hold` means "Do not close the initial session
+   automatically when it ends" -- so after the user answered ZELIA's own
+   clean prompt and the underlying bash process exited, Konsole's own
+   native hold behavior kicked in *again* on top of that, which is almost
+   certainly the "second, weird" artifact (this machine only has Konsole
+   installed, so that's confirmed as the actual terminal in play, not a
+   guess). Fixed by removing the native hold flags from
+   `TERMINAL_RUN_FLAGS` entirely for every terminal listed, not just
+   Konsole -- ZELIA's own script-level prompt is now the only mechanism,
+   giving one consistent message regardless of which terminal emulator is
+   installed. Confirmed live: ran a real command through `open_terminal`,
+   screenshotted the result -- exactly one clean `[done -- press enter to
+   close]` line, no second artifact underneath it.
+   **Also worth recording: a testing mistake, not a code bug.** While
+   verifying this fix, `desktop_control.press_key('enter')` was called
+   directly (bypassing `agent_loop.py`'s busy-gate, which only runs when
+   going through the real tool-dispatch path) to try to close the test
+   terminal -- but window focus had already moved to something else on
+   this genuinely busy, actively-used desktop by the time the key press
+   fired, so the Enter landed in a live Minecraft-mod-development
+   launcher window instead ("Gridlock 1.21.11") rather than the intended
+   terminal. Checked immediately via `ps aux` for a newly-spawned game
+   client process -- none appeared, only pre-existing Fabric test-server
+   processes from before the incident, so nothing was actually triggered.
+   Cleaned up by killing the stuck test terminal by PID directly instead
+   of risking a second misdirected keypress. **Lesson for future
+   sessions**: never call `desktop_control` input functions (`press_key`/
+   `type_text`/`click_at`) directly for manual testing/verification --
+   always go through the real dispatch path (`agent_loop._dispatch_tool`
+   or the busy-gate-covered tool call) even for a "quick check," since
+   direct calls skip the exact safety mechanism (`_busy_gate`/
+   `INPUT_INJECTING_TOOLS`) built specifically to prevent this.
+30. ~~Adding ~21 new tools in one batch (see items 27-28's tool set)
+   broke basic small-brain reliability, including for requests needing NO
+   tools at all~~ -- found live testing the day's new features with the
+   user watching. Root-caused precisely, not just "too many tools":
+   `small_brain.py` never set Ollama's `num_ctx`, so it silently defaulted
+   to 4096 tokens. `TOOL_SCHEMAS`' JSON alone grew to ~23000 chars (~38-49
+   tools depending on the point in this pass) -- comfortably larger than
+   the whole context budget once the system prompt and a user message are
+   added too. Confirmed by direct, isolated reproduction against
+   `ollama.chat()` (bypassing this whole codebase): the identical 38-tool
+   schema + a bare "say hello" produced a WRONG tool call (calling
+   `type_text` for a message that needs no tool at all) and took ~40s,
+   every time, at `num_ctx` unset/default -- but the exact same call with
+   `options={'num_ctx': 8192}` correctly replied in plain text with no
+   tool call. Binary-searched the actual breaking point with the codebase's
+   real tool list: fine through 36 tools, broken at 38 -- consistent with
+   a hard context-overflow cliff, not a gradual "model gets confused by
+   choice" effect. Fixed: `small_brain.py` now always passes
+   `options={"num_ctx": 16384}` (4x the accidental default), leaving real
+   headroom for tool growth and multi-round tool-result accumulation.
+   Confirmed fixed: the same reproduction script with the fix applied
+   replies correctly and fast (~2-6s) on a warm cache.
+   Also consolidated the day's new tools from ~20 separate names down to
+   ~9 action-based ones (`clipboard(action=...)`, `volume(action=...)`,
+   `brightness`, `power` -- lock_screen merged in as `action='lock'` --
+   `timer`, `tui_session`) to reduce schema size further as a second,
+   independent mitigation, not just relying on the context-window fix
+   alone.
+31. **NOT resolved -- confirmed live, still open**: even after the
+   `num_ctx` fix, the small model fabricated two separate false "done"
+   claims during this same testing session, each confirmed via journal
+   logs showing ZERO tool-call dispatch for the claimed action:
+   - Asked to open a specific Gemini chat by topic: 3 separate live
+     attempts (across two rounds of significantly strengthened system-
+     prompt/tool-description guidance, including an explicit "NEVER
+     invent a URL" warning added mid-session) all resulted in
+     `open_browser` being called with a fabricated URL shaped like
+     `https://gemini://chat?tab=...` or similar -- never once correctly
+     using `read_brave_tab`/`click_brave_element` as instructed, despite
+     both being proven to work correctly via direct testing (see item 28
+     above). **User's sharp diagnosis, worth remembering**: the model is
+     very likely pattern-matching the word "Gemini" against the real,
+     unrelated `gemini://` URI scheme (an actual, older internet
+     protocol, well-represented in training data) rather than confusing
+     itself randomly -- all three fabricated URLs shared that exact
+     `gemini://` shape, not varied nonsense. A third prompt fix
+     explicitly disambiguating "Gemini here always means
+     https://gemini.google.com, never the gemini:// protocol" was added
+     but NOT yet re-tested live (ran out of time in this session) --
+     test this specific fix first before concluding prompt-tuning alone
+     can't fix this.
+   - Asked to write text to the clipboard: replied "The text ... has been
+     placed on your clipboard" -- confirmed via journal that
+     `clipboard_tool.write_clipboard` was never called at all, and via
+     `wl-paste` that the real clipboard content was unrelated leftover
+     text from the earlier failed Gemini test.
+   Both failures are the *same* underlying pattern: confidently reporting
+   an action as complete without ever calling the tool that does it --
+   this is Known Issue #11's already-documented "small-model tool-calling
+   reliability is inconsistent," but reproduced fresh, live, twice, in
+   this session specifically (not just theorized from older test notes).
+   **Important, separately-confirmed correction, don't repeat this
+   mistake**: `lock_screen` initially looked like a THIRD instance of
+   this same pattern (journal showed `power_tool | Locked the screen.`
+   logged -- a real call, unlike the two cases above -- but
+   `loginctl show-session ... -p LockedHint` read back `no` immediately
+   after). This was NOT a fabrication or a tool bug -- it was checking
+   too fast, before KDE's screen locker actually finished engaging after
+   the async D-Bus signal; the user confirmed the screen genuinely did
+   lock (with a second, unplanned lock-again shortly after, caused by an
+   extra manual diagnostic `busctl ... Lock` call made during
+   investigation, not a bug). **When verifying an action against real
+   system state, allow for real async delay before concluding failure --
+   a call that logged success and had a plausible reason to need a moment
+   (D-Bus signal -> daemon reacts -> UI renders) deserves a recheck after
+   a beat, not an immediate verdict.** This session's two REAL fabrication
+   cases (Gemini URL, clipboard) are distinguishable from this false
+   alarm precisely because they had NO corresponding "did the actual
+   thing" log line at all, at any point -- that absence is the reliable
+   signal, not a slow-to-update read of external state.
+   **Not yet tested at all this session, deliberately skipped to avoid
+   burning more of the user's limited time on likely-repeat findings**:
+   brightness, notifications, timers, man-page reading, AT-SPI clicking,
+   and all TUI functionality (also blocked separately -- `tmux` still
+   isn't installed). Pick these up fresh next time, ideally after making
+   real progress on the fabrication pattern above, since that's the
+   thing most likely to make every one of these look broken even if the
+   underlying tool code is fine.
 
 Still open:
 
@@ -1316,16 +1762,14 @@ Roughly in the order the user raised them. (Text-chat input mode, formerly
 listed here, is done — see "Second brain" above for `text_input.py`/
 `text_repl.py`.)
 
-1. **GUI automation is still generic/best-effort for precise interaction**,
-   not app-specific, even though `read_screen_text` now prefers AT-SPI for
-   *reading* (see "Screen reading" above). `find_text_on_screen` + `click_at`
-   are still screenshot-and-guess for *clicking* things -- AT-SPI can also
-   drive actions (`Atspi.Action`/`Atspi.Component` interfaces support
-   invoking buttons and getting exact on-screen coordinates directly,
-   which would be far more precise than OCR-and-click for apps it works
-   with), but that wasn't built this pass, only reading was. Worth doing
-   for apps like Godot's editor where precise interaction matters more
-   than just reading text.
+1. ~~GUI automation was generic/best-effort for precise interaction,
+   AT-SPI only covered *reading*~~ -- `atspi_tool.invoke_action`
+   (`atspi_click` tool) now drives actions directly (`Atspi.Action`'s
+   `do_action(0)`), see item 7 below for the full writeup.
+   **Written but not yet tested live** -- same caveat as everything else
+   in that entry. `find_text_on_screen` + `click_at` remain the fallback
+   for apps that don't expose AT-SPI (Electron/CEF apps -- Steam,
+   Discord, Brave, etc), which this doesn't and can't change.
 2. **Self-diagnostics** — the user wants ZELIA to be able to check her own
    health/logs and self-correct when told to. Currently only possible
    ad-hoc (she *can* run `journalctl --user -u zelia` etc. via her shell
@@ -1339,6 +1783,119 @@ listed here, is done — see "Second brain" above for `text_input.py`/
 4. A genuine Claude API tier (as a third brain option) was discussed and
    explicitly **not** added — the user was told this is the one piece that
    wouldn't be free, and no decision was made either way.
+5. **Idle-task queue (`src/idle_tasks.py`) is built and wired in** — see
+   the Turbidle-adjacent section above for full detail. `add_idle_task`
+   tool queues a task, `IdleTaskRunner` runs it through the normal agent
+   pipeline once `resource_manager.is_fully_idle()` is true, aborting and
+   requeuing if the user becomes active mid-task. Confirmed live that
+   queuing works end-to-end; **not yet confirmed live that a queued task
+   actually fires during genuine idle time** (testing happened during a
+   real gaming session). The specific idle task the user originally had
+   in mind — open Gemini in Brave, scroll through every past chat, store
+   them to second_brain as memory — is still **not built**, but the bug
+   that was blocking it *is* fixed (see Known Issue #26 below, resolved
+   the same day it was raised) — the remaining work is just composing
+   already-working pieces (enumerate sidebar chats via
+   `click_brave_element`, read each with `read_brave_tab`,
+   `second_brain.remember()`), not further research.
+6. **Generic "Jarvis-ness" tools written 2026-08-06: clipboard,
+   volume/mute, brightness, desktop notifications, screen lock, power
+   actions, timers/reminders.** `src/agent/tools/{clipboard,volume,
+   brightness,notify,power,timer}_tool.py`, wired into `agent_loop.py`'s
+   `TOOL_SCHEMAS`/`_dispatch_tool`/`IDEMPOTENT_TOOLS`/system prompt, plus
+   a new `AgentLoop.announce` (wired from `main.py`'s `safe_speak`, same
+   post-construction pattern as `idle_task_runner`) so a fired timer can
+   speak unprompted independent of any request's own `speak()` callback.
+   Explicitly fills the "volume/brightness/clipboard/power/notifications/
+   timers" gap noted from the earlier Jarvis-TikTok capability comparison,
+   and the screen-lock gap specifically called out as missing (now via
+   `loginctl lock-session` -- desktop-environment-agnostic, not a
+   KDE-specific dbus call). `power_action` (shutdown/restart/suspend)
+   routes through the same generic `needs_confirmation` flow already used
+   for destructive shell commands; `lock_screen` deliberately does not
+   (reversible/low-risk, meant to feel instant).
+   **IMPORTANT -- written but NOT deployed or tested at all yet,
+   deliberately**: the user was busy with unrelated important work on
+   this machine at the time and explicitly asked for code only, no
+   syncing to `/opt/zelia`, no service restart, no live testing (any of
+   which could have interrupted what they were doing, or in the power/
+   lock actions' case, be actively dangerous to test blind while they're
+   mid-task). Only checked via `py_compile` and a plain import (confirms
+   no syntax/import errors, nothing about actual runtime behavior).
+   Genuinely unverified: whether `wpctl`'s real output format matches the
+   regex in `volume_tool.get_volume`, whether `/sys/class/backlight`
+   exists at all on this desktop (see that module's docstring -- likely
+   *doesn't*, external monitors usually aren't kernel-backlight-
+   controlled), whether `loginctl lock-session` actually locks this
+   specific session vs. silently no-op'ing, and the whole
+   `power_action`/`needs_confirmation`/`ask_confirmation` round-trip for
+   a brand-new tool name. **Sync, restart, and actually test every one of
+   these live before trusting any of it** -- next session (or whenever
+   the user is free) should treat this exactly like every other feature
+   in this file that's marked "confirmed live" vs. not; this one isn't,
+   yet.
+7. **More generic-use tools written the same day, same "not deployed,
+   not tested" caveat as item 6 applies here too**: local man-page
+   reading, TUI (interactive terminal tool) support, and precise AT-SPI
+   clicking.
+   - `src/agent/tools/man_tool.py` (`read_man_page`): reads a command's
+     real local man page (via `man` + `col -bx` to strip formatting
+     control chars), falling back to `--help` output for tools that don't
+     ship a man page (common for single-binary Rust/Go tools). The one
+     part of this pass actually exercised locally (a plain read-only
+     `man ls` call, not touching the running service) -- confirmed it
+     produces clean, correctly-stripped text.
+   - `src/agent/tools/tui_tool.py` (`start_tui`/`send_keys`/
+     `read_tui_screen`/`stop_tui`/`list_tui_sessions`): drives interactive
+     terminal tools (htop, vim, REPLs, ncurses menus) that
+     `run_in_terminal`/`run_shell_quiet` can't do anything with beyond
+     "launch and hope," since neither can send further input or read back
+     current screen state. Built on `tmux` (`new-session -d` +
+     `send-keys` + `capture-pane`) rather than hand-rolling pty handling
+     -- **tmux is NOT installed on the reference machine**, added to
+     `depends` in both PKGBUILDs and `install.sh`'s package list, but
+     needs an actual `pacman -S tmux` (or a fresh package build/install)
+     before this tool does anything but return a clear "not installed"
+     error. `start_tui`'s `location` param controls the (optional)
+     viewer: `"desktop"` opens a real terminal window attached to the
+     tmux session (default, matches "nothing hidden" philosophy);
+     `"vtty"` attaches on the dedicated virtual terminal instead, via a
+     new `desktop_control.open_vtty_viewer()` -- explicitly the "run in
+     the background" fallback the user asked for (doesn't compete for
+     screen/focus while gaming); `"background"` attaches no viewer at
+     all. `open_vtty_viewer` reuses `run_in_vtty`'s exact sudo/openvt/
+     runuser command shape (same sudoers rule) but fire-and-forget via
+     `Popen` instead of blocking with a timeout + log-file capture, since
+     "attach and stay attached indefinitely" has no natural completion to
+     wait for -- **this specific piece is the least confident part of
+     this pass**: it assumes the existing narrowly-scoped sudoers rule
+     (`/usr/bin/openvt -c 9 -- /usr/bin/runuser ...`) matches this new
+     invocation's exact argument shape closely enough to still be
+     permitted without a password; couldn't verify this by reading the
+     actual sudoers file (permission denied without triggering a sudo
+     prompt, which was avoided per the user's "don't disturb anything
+     right now" instruction) -- **test the `location='vtty'` path first
+     and specifically watch for a hung/failed sudo call**, not just
+     whether tmux itself works.
+   - `src/agent/tools/atspi_tool.py` gained `invoke_action(name)`
+     (exposed as the `atspi_click` tool): walks the focused app's
+     accessibility tree for a control whose name matches and calls its
+     default AT-SPI action directly (`do_action(0)`) -- no screenshot, no
+     OCR, no coordinate math, no synthetic mouse movement. Fills Pending
+     Feature #1 below (AT-SPI could already *read*, via
+     `read_focused_app`/`screen_tool.py`, but had no *action*-invocation
+     capability until now). Same "detect AT-SPI availability, fall back
+     to OCR+click_at gracefully" pattern as reading already uses -- won't
+     work at all for Electron/CEF apps (Steam, Discord, Brave) that don't
+     expose AT-SPI, same known limitation as the reading side. Added to
+     both `INPUT_INJECTING_TOOLS` (busy-gate applies, same as `click_at`)
+     and `SCREEN_VISIBILITY_TOOLS`.
+   All three confirmed via `py_compile` + a plain import + schema-presence
+   check only -- **zero live testing**, same constraint as item 6, for the
+   same reason (user busy with unrelated important work, explicitly asked
+   for code-only). Test all of this together with item 6's tools in one
+   pass once the user's free, and install `tmux` first or `start_tui`
+   will just error out immediately.
 
 ## Config reference
 

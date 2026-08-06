@@ -26,6 +26,7 @@ from src.brains.large_brain import LargeBrain
 from src.memory.second_brain import SecondBrain
 from src.agent.agent_loop import AgentLoop
 from src.game_guard import GameGuard
+from src.idle_tasks import IdleTaskRunner
 
 log = get_logger("main")
 
@@ -119,6 +120,8 @@ def main():
         top_k=cfg.memory.retrieval_top_k,
     )
 
+    activation_lock = threading.Lock()
+
     agent = AgentLoop(
         small_brain=small_brain,
         large_brain=large_brain,
@@ -130,9 +133,21 @@ def main():
         default_browser=cfg.desktop.get("default_browser", "floorp"),
         config_path=os.environ.get("ZELIA_CONFIG", f"{cfg.install_dir}/config/config.yaml"),
         ask_for_password=build_password_asker(stt, tts),
+        game_guard=game_guard,
     )
 
-    activation_lock = threading.Lock()
+    idle_cfg = cfg.get("idle_tasks", {})
+    if idle_cfg.get("enabled", True):
+        idle_task_runner = IdleTaskRunner(
+            state_path=f"{cfg.install_dir}/state/idle_tasks.json",
+            agent=agent,
+            activation_lock=activation_lock,
+            game_guard=game_guard,
+            poll_seconds=idle_cfg.get("poll_seconds", 30.0),
+        )
+        agent.idle_task_runner = idle_task_runner
+        idle_task_runner.start()
+        log.info("Idle task queue active (%d task(s) pending from a previous run).", idle_task_runner.pending_count())
 
     def safe_speak(text: str) -> None:
         # A TTS failure (bad audio device, a Piper API mismatch, etc.) should
@@ -143,6 +158,14 @@ def main():
             tts.speak(text)
         except Exception as exc:  # noqa: BLE001
             log.error("TTS failed (continuing without voice for this reply): %s", exc)
+
+    # Set post-construction, same pattern as idle_task_runner above --
+    # safe_speak needs tts, which needs to already exist; agent.announce is
+    # how a fired timer (see timer_tool.py/agent_loop.py's set_timer
+    # dispatch) speaks unprompted, independent of any request's own
+    # speak() callback, which is long gone by the time a timer actually
+    # goes off (could be minutes/hours after the request that set it).
+    agent.announce = safe_speak
 
     def on_wake():
         if not activation_lock.acquire(blocking=False):
