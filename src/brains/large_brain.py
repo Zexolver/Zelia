@@ -21,6 +21,8 @@ import time
 import uuid
 from collections import deque
 
+from src.config import load_config
+from src.resource_manager import get_budget, is_fully_idle
 from src.utils.logger import get_logger
 
 log = get_logger("large_brain")
@@ -36,8 +38,15 @@ class LargeBrain:
         if self.game_guard is not None:
             self._start_queue_drainer()
 
-    def submit_async(self, prompt: str, on_done, model: str | None = None, compression: str | None = None):
-        job = {"prompt": prompt, "on_done": on_done, "model": model, "compression": compression}
+    def submit_async(self, prompt: str, on_done, model: str | None = None, compression: str | None = None,
+                      workspace_dir: str | None = None):
+        """workspace_dir enables the coding-agent path (airllm_worker.py runs
+        an actual read/write/run-code tool loop scoped to that directory,
+        see its module docstring) instead of a single plain completion."""
+        job = {
+            "prompt": prompt, "on_done": on_done, "model": model,
+            "compression": compression, "workspace_dir": workspace_dir,
+        }
 
         if self.game_guard is not None and self.game_guard.is_gaming():
             log.info("Game detected -- queuing big-brain job until it's over.")
@@ -53,13 +62,28 @@ class LargeBrain:
         result_path = tempfile.mktemp(prefix=f"zelia_result_{job_id}_", suffix=".json")
 
         with open(job_path, "w") as f:
-            json.dump({"prompt": job["prompt"], "model": job["model"], "compression": job["compression"]}, f)
+            json.dump({
+                "prompt": job["prompt"], "model": job["model"], "compression": job["compression"],
+                "workspace_dir": job.get("workspace_dir"),
+            }, f)
 
         log.info("Submitting big-brain job %s in the background...", job_id)
 
         def run():
+            # Checked once, at launch -- like the gaming queue-check above,
+            # not re-evaluated for the rest of the job's run. A job that
+            # starts under Turbidle and then the user comes back mid-run
+            # keeps its already-granted budget rather than being throttled
+            # out from under it; the plain (non-Turbidle) caps already exist
+            # specifically to keep the rest of the machine usable even then,
+            # so this isn't unsafe, just not instantly reactive. Live
+            # resizing an already-running scope's cgroup limits
+            # (`systemctl --user set-property`) would be the way to make it
+            # reactive, not attempted here -- a bigger, separate change.
+            turbidle = is_fully_idle(self.game_guard)
+            budget = get_budget(load_config(), turbidle=turbidle)
             proc = subprocess.run(
-                [sys.executable, "-m", "src.brains.airllm_worker", job_path, result_path],
+                budget.systemd_run_args() + [sys.executable, "-m", "src.brains.airllm_worker", job_path, result_path],
             )
             try:
                 with open(result_path) as f:

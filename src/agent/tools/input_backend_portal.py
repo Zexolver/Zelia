@@ -30,7 +30,7 @@ isolated seat; per wayland.app's compositor compatibility matrix this
 includes KWin 6.6+, Mutter 49.2+, and wlroots 0.18+-based compositors
 (Sway, Hyprland, etc), among others.
 
-One-time setup per ZELIA process lifetime: the very first input action
+One-time setup, persisted across restarts: the first-ever input action
 triggers a real consent dialog ("<app> is asking for special privileges:
 Control input devices") that a human must approve -- same principle as
 every other permission prompt in this project, not something to be
@@ -38,8 +38,22 @@ auto-clicked (confirmed live: even if it could be scripted, a synthetic
 click made by ZELIA's own current input path approving her own privilege
 escalation request would defeat the point of asking at all -- this is
 the same reasoning as declining the screen-unlock-bypass request
-earlier). The session persists after that for the rest of the process's
-life; no repeat prompts.
+earlier).
+
+That approval is remembered from then on using the portal's own
+persist_mode/restore_token mechanism (RemoteDesktop interface version 2,
+confirmed present here via `busctl --user introspect
+org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop
+org.freedesktop.portal.RemoteDesktop` -> `.version 2`) -- this is the
+same officially-supported "remember this grant" feature screen-sharing
+apps use so you're not asked every single call, not a workaround or a
+bypass of the prompt. SelectDevices is called with persist_mode=2
+("until explicitly revoked") and, once granted, Start()'s results
+include a restore_token that's saved to disk (~/.zelia/state/
+portal_restore_token) and replayed on every future SelectDevices call so
+the portal recognizes the grant and skips the dialog. Delete that file
+(or revoke the grant via the desktop's own permission settings) to force
+a fresh prompt.
 
 Known limitation: click_at's absolute positioning isn't backed by real
 cursor-position feedback the way the ydotool backend's KWin-scripting
@@ -53,6 +67,7 @@ enough to hit a screen edge (compositors reliably clamp cursor motion at
 monitor boundaries), then moves the exact target offset from that known
 point in one single relative move.
 """
+import os
 import threading
 import time
 import uuid
@@ -71,6 +86,30 @@ REMOTE_DESKTOP_IFACE = "org.freedesktop.portal.RemoteDesktop"
 
 DEVICE_KEYBOARD = 1
 DEVICE_POINTER = 2
+
+# persist_mode: 2 = "persist until explicitly revoked" (vs 0 = don't
+# persist, 1 = only while the app is running) -- see this module's
+# docstring for why this is the portal's own supported mechanism, not a
+# workaround.
+PERSIST_UNTIL_REVOKED = 2
+
+_STATE_DIR = os.path.expanduser("~/.zelia/state")
+_RESTORE_TOKEN_PATH = os.path.join(_STATE_DIR, "portal_restore_token")
+
+
+def _load_restore_token() -> str | None:
+    try:
+        with open(_RESTORE_TOKEN_PATH) as f:
+            token = f.read().strip()
+            return token or None
+    except OSError:
+        return None
+
+
+def _save_restore_token(token: str) -> None:
+    os.makedirs(_STATE_DIR, exist_ok=True)
+    with open(_RESTORE_TOKEN_PATH, "w") as f:
+        f.write(token)
 
 # A large-enough relative move to hit any real monitor edge from anywhere
 # on this project's reference 3-monitor, 4280x1920 virtual desktop (see
@@ -178,21 +217,34 @@ class _PortalSession:
                 return
             self._ensure_bus()
 
-            log.info("No active RemoteDesktop portal session yet -- creating one "
-                     "(this will show a one-time 'control input devices' consent prompt).")
+            restore_token = _load_restore_token()
+            if restore_token:
+                log.info("No active RemoteDesktop portal session yet -- creating one "
+                         "using a saved restore token (should reuse the earlier grant, "
+                         "no new consent prompt).")
+            else:
+                log.info("No active RemoteDesktop portal session yet -- creating one "
+                         "(this will show a one-time 'control input devices' consent "
+                         "prompt; approving it is remembered for next time).")
+
             session_token = "zelia_session_" + uuid.uuid4().hex[:8]
             results = self._request_call(
                 "CreateSession", [{"session_handle_token": GLib.Variant("s", session_token)}], "a{sv}",
             )
             self._session_handle = results["session_handle"]
 
-            self._request_call(
-                "SelectDevices",
-                [self._session_handle, {"types": GLib.Variant("u", DEVICE_KEYBOARD | DEVICE_POINTER)}],
-                "oa{sv}",
-            )
+            select_options = {
+                "types": GLib.Variant("u", DEVICE_KEYBOARD | DEVICE_POINTER),
+                "persist_mode": GLib.Variant("u", PERSIST_UNTIL_REVOKED),
+            }
+            if restore_token:
+                select_options["restore_token"] = GLib.Variant("s", restore_token)
+            self._request_call("SelectDevices", [self._session_handle, select_options], "oa{sv}")
 
             results = self._request_call("Start", [self._session_handle, "", {}], "osa{sv}")
+            new_token = results.get("restore_token")
+            if new_token:
+                _save_restore_token(new_token)
             log.info("RemoteDesktop portal session active (devices granted: %s).", results.get("devices"))
             self._ready = True
 
