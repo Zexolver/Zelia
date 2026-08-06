@@ -130,3 +130,59 @@ def read_focused_app() -> dict:
         "text": joined,
         "note": "truncated -- this app has a lot of content, ask about a specific part if you need more" if truncated else None,
     }
+
+
+def _find_actionable(accessible, name_query: str, depth: int = 0):
+    """Depth-first search for the first control whose accessible name
+    contains name_query (case-insensitive) AND supports the Action
+    interface (i.e. is actually invokable, not just a label). Returns
+    (control, control_name) or None."""
+    if depth > MAX_DEPTH:
+        return None
+    try:
+        name = (accessible.get_name() or "").strip()
+        if name and name_query in name.lower() and accessible.is_action():
+            return accessible, name
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for i in range(accessible.get_child_count()):
+            child = accessible.get_child_at_index(i)
+            if child is not None:
+                found = _find_actionable(child, name_query, depth + 1)
+                if found:
+                    return found
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def invoke_action(name: str) -> dict:
+    """Finds a control in the focused app's accessibility tree whose name
+    matches `name` and invokes its default action (e.g. clicking a
+    button, activating a menu item) directly via AT-SPI's Action
+    interface -- no screenshot, no OCR, no coordinate guessing, no
+    synthetic mouse movement at all. Far more precise than
+    find_text_on_screen + click_at for any app that exposes AT-SPI (most
+    native Qt/GTK apps) -- {"ok": False} if the app doesn't expose
+    AT-SPI at all (most Electron/CEF apps, e.g. Steam) or no matching
+    actionable control is found, in which case the caller should fall
+    back to find_text_on_screen + click_at."""
+    app_name, window = get_focused_window()
+    if window is None:
+        return {"ok": False, "error": "No AT-SPI-accessible window is currently focused."}
+
+    found = _find_actionable(window, name.lower())
+    if found is None:
+        return {"ok": False, "error": f"No actionable control matching '{name}' found in '{app_name}'."}
+
+    control, control_name = found
+    try:
+        action = control.get_action_iface()
+        if action.get_n_actions() == 0:
+            return {"ok": False, "error": f"Found '{control_name}' but it has no invokable action."}
+        action.do_action(0)  # index 0 is always the control's default action, e.g. "click" for a button
+        log.info("Invoked AT-SPI action on '%s' (matched '%s') in '%s'", control_name, name, app_name)
+        return {"ok": True, "matched": control_name, "app": app_name}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not invoke action on '{control_name}': {exc}"}
