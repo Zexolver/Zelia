@@ -1760,6 +1760,45 @@ first rather than assuming the existing code is still correct.
      structure for compound requests, not a per-feature bug to chase one
      at a time. Worth treating as the single highest-priority thing to
      work on next, above adding further capability.
+34. ~~`atspi_click` had never actually been exercised live~~ -- now
+   confirmed working, overnight (2026-08-07), after the fixes above were
+   deployed and the user had gone to sleep. Real dispatch, correct
+   target, real result: `atspi_tool | Invoked AT-SPI action on 'Manjaro
+   Settings Manager' (matched 'Settings') in 'plasmashell'`. Worth
+   recording exactly how this was almost missed, since it's a genuinely
+   subtle, distinct issue from the fabrication pattern documented above:
+   the tool call succeeded, but the model's SPOKEN reply narrated it as
+   an upcoming action ("I will now use the atspi_click tool...") when it
+   had already happened earlier in that same tool-calling turn -- a
+   *timing/tense* mistake in how it describes its own actions, not a
+   missing action. Two follow-up "yes, go ahead" messages sent after that
+   reply (reasonably, since the reply read as a pending question) each
+   landed as fresh, context-less requests (no conversation continuity
+   between separate `zelia-say` calls -- documented, expected behavior),
+   so the model had no memory of "Settings" being the AT-SPI target and
+   fell back to `click_at` with blind guessed coordinates both times.
+   Those two `click_at` calls are real, harmless test noise (clicked
+   into empty desktop space), not a new bug -- don't misread a stale-
+   memory follow-up as `atspi_click` failing again if this comes up.
+35. **Unresolved, likely transient, not reproduced on a clean retry**: a
+   request phrased around a tool name that doesn't actually exist
+   (`read_focused_app`, which is real code but only ever called
+   internally by `screen_tool.read_screen_text`, never exposed in
+   `TOOL_SCHEMAS`) appeared to hang for 7+ minutes with zero further
+   activity -- Ollama's own logs showed its `/api/chat` call had
+   completed in ~21s, so whatever hung was somewhere in this codebase's
+   tool-dispatch path afterward, not the model call itself. Investigated
+   the obvious suspect (`atspi_tool.get_focused_window()`, since it walks
+   every app's AT-SPI tree with no timeout) by calling it directly and
+   isolated -- returned in 0.4s, ruling that out specifically. Restarted
+   the service to clear it (no sudo needed, `systemctl --user restart`)
+   rather than diagnose further live at 1am; an immediate, cleanly-
+   phrased retry with a real tool name worked correctly and quickly
+   (~10s). Given it didn't recur, this is logged as a one-off rather than
+   chased further -- but if a real hang happens again, the useful next
+   step is checking Ollama's own request log first (confirms whether the
+   model call itself is the slow part or not) before assuming a specific
+   tool is the cause.
 
 Still open:
 
