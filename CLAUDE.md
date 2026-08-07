@@ -1800,6 +1800,53 @@ first rather than assuming the existing code is still correct.
    model call itself is the slow part or not) before assuming a specific
    tool is the cause.
 
+**Proposed but deliberately NOT implemented tonight (2026-08-07,
+overnight, no sudo/deployment access -- didn't want to guess at
+behavior-changing logic without being able to verify it live)**: a
+concrete, scoped design for actually fixing Known Issue #11/#42's
+fabrication pattern, for whoever picks this up next.
+
+More prompt-tuning alone has now been tried three times this session
+(the `gemini://` disambiguation, the "never invent a URL" warning, the
+memory-framing reframe) with only partial effect -- diminishing returns,
+and every one of tonight's fabrications happened on the model's FIRST
+substantive response in a turn (zero tool calls made yet), never after
+several rounds of legitimate tool use. That's a real, exploitable
+pattern: a code-level check specific to "the very first response of a
+turn confidently claims a real-world action, but zero tools were called
+at all yet" could catch this class of failure without needing the model
+to police itself via wording alone.
+
+Sketch: in `agent_loop.py`'s tool-calling loop, track
+`any_tool_called_this_turn = False`, set `True` the moment any real
+dispatch happens. If a round produces a final answer (no `tool_calls`)
+while that flag is still `False`, AND the content matches a narrow,
+conservative action-claim pattern (something like `\b(I've|I have|I
+just)\s+(opened|clicked|typed|set|placed|copied|saved|written|deleted|
+created|sent|locked|unlocked)\b`) -- don't return that reply. Instead
+inject one corrective system-level note ("You just claimed to have done
+something without calling any tool -- either call the real tool now, or
+tell the user honestly that you didn't actually do it") and run exactly
+one more round with tools re-enabled, then use THAT round's result
+regardless of what it is (don't loop this correction more than once,
+to avoid a new stall mode).
+
+**Why this wasn't just built and shipped tonight**: the regex is a
+genuine judgment call -- too broad and it'll false-positive on benign
+replies (e.g. "I've noted that" or a reply correctly describing a tool
+result from an EARLIER round wouldn't trigger this specific check since
+`any_tool_called_this_turn` guards it, but a legitimately worded
+non-action sentence using one of these verbs conversationally still
+could), too narrow and it misses real fabrications with different
+phrasing. This needs the same live-reproduction-and-iterate approach
+used for every other fix this session (e.g. the URL-validation regex,
+tuned against every real fabricated URL actually seen) -- testing it
+blind, overnight, with no way to watch it run against real requests
+and no way to undo a bad deploy quickly, was judged too risky for what
+it's worth. Build and tune this against a batch of the exact fabrication
+transcripts already logged in this file (items 26-35 above) before
+trusting it.
+
 Still open:
 
 20. **`game_guard`'s `\.exe$` pattern has a confirmed false-positive mode
