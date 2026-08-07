@@ -42,11 +42,19 @@ _NO_DEVICE_ERROR = (
 def get_brightness() -> dict:
     device = _find_backlight()
     if device is None:
+        # Confirmed live (2026-08-06): this path had no logging at all,
+        # which left it genuinely ambiguous whether a "no backlight
+        # device" reply meant the tool was actually called, or the model
+        # just paraphrased this same error text straight from its own
+        # tool-schema description without calling anything. Every other
+        # branch in this module already logs -- this was the one gap.
+        log.info("get_brightness: no backlight device found.")
         return {"ok": False, "error": _NO_DEVICE_ERROR}
     try:
         current = int((device / "brightness").read_text().strip())
         maximum = int((device / "max_brightness").read_text().strip())
         percent = round(current / maximum * 100) if maximum else 0
+        log.info("get_brightness: %d%% (device=%s)", percent, device.name)
         return {"ok": True, "brightness_percent": percent}
     except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"Could not read brightness: {exc}"}
