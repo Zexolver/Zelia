@@ -56,11 +56,22 @@ def _session_name(session_id: str) -> str:
     return f"{_SESSION_PREFIX}{session_id}"
 
 
+_VTTY_DISABLED_ERROR = (
+    "location='vtty' is disabled -- a real incident (2026-08-07) confirmed the sudoers rule "
+    "doesn't actually cover this invocation, and the unsafe retry/prompt fallback that "
+    "exposed temporarily locked the user's own account via pam_faillock. Use "
+    "location='background' instead (no viewer, but no risk), or 'desktop' if a visible "
+    "window is acceptable. See desktop_control.open_vtty_viewer's docstring before re-enabling."
+)
+
+
 def start_tui(command: str, location: str = "desktop", cwd: str | None = None) -> dict:
     if not _has_tmux():
         return {"ok": False, "error": _NOT_INSTALLED_ERROR}
-    if location not in ("desktop", "vtty", "background"):
-        return {"ok": False, "error": f"Unknown location '{location}' -- must be 'desktop', 'vtty', or 'background'."}
+    if location == "vtty":
+        return {"ok": False, "error": _VTTY_DISABLED_ERROR}
+    if location not in ("desktop", "background"):
+        return {"ok": False, "error": f"Unknown location '{location}' -- must be 'desktop' or 'background'."}
 
     session_id = str(uuid.uuid4())[:8]
     session = _session_name(session_id)
@@ -82,11 +93,6 @@ def start_tui(command: str, location: str = "desktop", cwd: str | None = None) -
         if not viewer.get("ok"):
             return {"ok": True, "session_id": session_id, "location": location, "command": command,
                      "warning": f"Session started but couldn't open a visible window: {viewer.get('error')}"}
-    elif location == "vtty":
-        viewer = desktop_control.open_vtty_viewer(f"tmux attach -t {session}")
-        if not viewer.get("ok"):
-            return {"ok": True, "session_id": session_id, "location": location, "command": command,
-                     "warning": f"Session started but couldn't attach a vTTY viewer: {viewer.get('error')}"}
 
     return {"ok": True, "session_id": session_id, "location": location, "command": command}
 

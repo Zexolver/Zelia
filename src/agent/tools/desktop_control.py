@@ -189,7 +189,10 @@ def run_in_vtty(command: str, cwd: str | None = None) -> dict:
 
 
 def open_vtty_viewer(command: str) -> dict:
-    """Fire-and-forget: attaches `command` live on the dedicated VT
+    """**CONFIRMED BROKEN with the current sudoers rule as of 2026-08-07 --
+    see the incident note below before re-enabling this for real use.**
+
+    Fire-and-forget: attaches `command` live on the dedicated VT
     (_VTTY_NUMBER) without waiting for it to finish or capturing its
     output. Unlike run_in_vtty above (which blocks with a timeout and
     redirects output to a log file -- built for a command that runs to
@@ -198,24 +201,53 @@ def open_vtty_viewer(command: str) -> dict:
     for tui_tool.py's vTTY-viewer mode -- its actual terminal I/O needs to
     reach the VT's real console directly, not be piped into a file.
 
-    Same underlying sudo/openvt/runuser command shape and sudoers rule as
-    run_in_vtty (see its docstring) -- just launched async (Popen, no
-    timeout, no output redirection) instead of run-to-completion, since
-    "attach and stay attached" has no natural end to wait for. Not
-    visible unless the user manually switches VTs (Ctrl+Alt+F9), same as
-    run_in_vtty."""
+    **Real incident, 2026-08-07**: this used plain `sudo` (matching
+    run_in_vtty's existing pattern), which -- unlike run_in_vtty -- runs
+    from a fully headless, unattended context (fired async via `Popen`
+    from a background service call, nobody watching, no controlling tty
+    ever available for it to prompt on). Two concurrent calls (two TUI
+    sessions started back to back) each spawned their own `sudo`, each
+    failed PAM authentication (no tty to read a password from), and
+    `pam_faillock` counted three consecutive real auth failures within
+    seconds -- temporarily locking the user's own account.
+
+    Confirmed via direct testing afterward that the exact real command
+    line (`sudo openvt -c 9 -- runuser -u <user> -- bash -c <command>`)
+    fails even with `-n` ("a password is required"), while `sudo -n -l`
+    (list/check mode) against the identical argument vector reports it
+    AS permitted -- these two disagree, meaning `-l` is not a trustworthy
+    predictor of whether the real invocation would actually succeed here
+    (sudoers list-matching is evidently more lenient than the real
+    authorization check). So there's no reliable way to pre-check this
+    short of just trying it -- but `sudo -n` for the REAL attempt is
+    still the fix: confirmed live it fails cleanly with no faillock entry
+    added at all (unlike plain `sudo`, which genuinely attempts PAM auth
+    and can fail it repeatedly). Using `-n` here specifically costs
+    nothing versus plain `sudo`: this function only ever runs headless,
+    so no human could ever answer an interactive prompt anyway -- plain
+    `sudo` could only ever fail here too, just dangerously instead of
+    safely. Left genuinely non-functional rather than attempting a
+    workaround for the sudoers-rule mismatch itself -- that's a sudoers
+    file edit, a security-sensitive change that should be a deliberate,
+    reviewed decision, not something to patch around silently.
+    tui_tool.py's `location="vtty"` is disabled at the tool-schema level
+    until that's actually fixed and reverified -- see its own comment."""
     if not shutil.which("openvt"):
         return {"ok": False, "error": "openvt isn't installed -- can't use a separate virtual terminal."}
     user = getpass.getuser()
     try:
         subprocess.Popen(
-            ["sudo", "openvt", "-c", str(_VTTY_NUMBER), "--",
+            ["sudo", "-n", "openvt", "-c", str(_VTTY_NUMBER), "--",
              "runuser", "-u", user, "--", "bash", "-c", command],
         )
     except FileNotFoundError:
         return {"ok": False, "error": "sudo isn't available -- can't get console access for openvt."}
-    log.info("Attached %r live on vtty%d.", command, _VTTY_NUMBER)
-    return {"ok": True, "vtty": _VTTY_NUMBER}
+    log.info("Attempted to attach %r on vtty%d via passwordless sudo (-n) -- if that's not "
+             "actually permitted by the sudoers rule, this silently does nothing rather than "
+             "prompting or retrying; see this function's docstring.", command, _VTTY_NUMBER)
+    return {"ok": True, "vtty": _VTTY_NUMBER,
+            "warning": "Passwordless sudo for this exact command is unconfirmed -- if nothing "
+                       "appears on the virtual terminal, this silently failed rather than asking for a password."}
 
 
 # --------------------------------------------------------------------------

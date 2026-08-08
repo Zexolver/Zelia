@@ -483,13 +483,13 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tui_session",
-            "description": "Drives an interactive terminal (TUI) tool -- htop, vim, a REPL, an ncurses installer menu, anything that takes over the terminal and needs ongoing keystrokes rather than just printing output and exiting. action='start' needs command (and optionally location: 'desktop' opens a real visible terminal window (default); 'vtty' attaches on a separate virtual terminal, invisible unless the user manually switches to it -- use this specifically when asked to run something in the background/without disturbing the user, e.g. while they're gaming; 'background' attaches no viewer at all) -- returns a session_id. action='send_keys' needs session_id+keys (set enter=false for single keypresses like 'q' or arrow keys). action='read_screen' needs session_id -- check this before deciding what to send next. action='stop' needs session_id. action='list' shows all running session ids.",
+            "description": "Drives an interactive terminal (TUI) tool -- htop, vim, a REPL, an ncurses installer menu, anything that takes over the terminal and needs ongoing keystrokes rather than just printing output and exiting. action='start' needs command (and optionally location: 'desktop' opens a real visible terminal window (default); 'background' attaches no viewer at all -- use this when asked to run something without disturbing the user, e.g. while they're gaming) -- returns a session_id. action='send_keys' needs session_id+keys (set enter=false for single keypresses like 'q' or arrow keys). action='read_screen' needs session_id -- check this before deciding what to send next. action='stop' needs session_id. action='list' shows all running session ids.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["start", "send_keys", "read_screen", "stop", "list"]},
                     "command": {"type": "string", "description": "Required for action='start', e.g. 'htop' or 'vim notes.txt'."},
-                    "location": {"type": "string", "enum": ["desktop", "vtty", "background"], "description": "Optional, for action='start'."},
+                    "location": {"type": "string", "enum": ["desktop", "background"], "description": "Optional, for action='start'."},
                     "session_id": {"type": "string", "description": "Required for action='send_keys'/'read_screen'/'stop'."},
                     "keys": {"type": "string", "description": "Required for action='send_keys'."},
                     "enter": {"type": "boolean", "description": "For action='send_keys' -- default true."},
@@ -942,11 +942,11 @@ class AgentLoop:
             "rather than guessing from what you already know (which may not match the "
             "actual installed version).\n"
             "- For anything interactive in a terminal that isn't just 'run a command and "
-            "read its output' -- htop, vim, a REPL, an ncurses menu -- use start_tui + "
-            "send_keys + read_tui_screen instead of run_in_terminal/run_shell_quiet, "
-            "which can't send further input once launched. Use location='vtty' "
-            "specifically when asked to do this in the background/without disturbing the "
-            "user (e.g. while they're gaming) instead of a visible window.\n"
+            "read its output' -- htop, vim, a REPL, an ncurses menu -- use tui_session "
+            "(action='start', then 'send_keys'/'read_screen'/'stop') instead of "
+            "run_in_terminal/run_shell_quiet, which can't send further input once launched. "
+            "Use location='background' specifically when asked to do this without disturbing "
+            "the user (e.g. while they're gaming) instead of a visible window.\n"
             "- Opening or focusing an app (show_me, launch_or_focus_app) does not "
             "type or click anything by itself -- if the task also involves typing "
             "text, pressing keys, or clicking something, you must still call "
