@@ -22,6 +22,18 @@ _last_activity = time.time()
 _lock = threading.Lock()
 _tracking = False
 
+# ydotool's own uinput-created virtual device (confirmed via
+# /proc/bus/input/devices: "N: Name=ydotoold virtual device") -- found
+# live 2026-08-07 as a real, previously-unnoticed bug: this module was
+# watching it too, meaning ZELIA's own synthetic type_text/press_key/
+# click_at input (injected through it) incorrectly counted as "the user
+# is here," resetting the idle clock right after her own actions. That's
+# self-defeating for the busy-gate this feeds (agent_loop._user_busy) --
+# it should reflect whether a REAL person is at the keyboard, not whether
+# ZELIA herself just moved the mouse. Same exclusion input_lock.py
+# already uses for the same device, same reason.
+_EXCLUDED_DEVICE_NAMES = {"ydotoold virtual device"}
+
 
 def _find_input_devices():
     import evdev
@@ -30,6 +42,8 @@ def _find_input_devices():
         try:
             dev = evdev.InputDevice(path)
         except OSError:
+            continue
+        if dev.name in _EXCLUDED_DEVICE_NAMES:
             continue
         caps = dev.capabilities()
         has_keys = evdev.ecodes.EV_KEY in caps
